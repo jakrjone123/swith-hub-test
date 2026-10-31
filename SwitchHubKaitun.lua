@@ -95,6 +95,9 @@ local KX = {
 	autoKen = true,
 	autoRaceV3 = true,
 	smartServerHop = true,
+	tweenSpeed = 185, -- Balanced anti-rubberband speed (165 Segura / 185 Moderada / 205 Rápida)
+	attackInterval = 0.095, -- Moderate fast-click cadence (~10.5 clicks/sec, safe & smooth)
+	noAttackAnimation = true, -- Removes character M1 swing/hit animation & lunge
 	fpsBoost = false,
 	afkMode = false,
 
@@ -164,6 +167,7 @@ local KX = {
 	lastAimEnemy = nil,
 	lastAimPart = nil,
 	lastAimPos = nil,
+	lastCombatTool = nil,
 	protectedTool = nil,
 	failedStoreCooldown = {},
 	fruitAttemptStart = {},
@@ -217,6 +221,8 @@ local function saveConfig()
 			autoKen = KX.autoKen,
 			autoRaceV3 = KX.autoRaceV3,
 			smartServerHop = KX.smartServerHop,
+			tweenSpeed = KX.tweenSpeed,
+			noAttackAnimation = KX.noAttackAnimation,
 			fpsBoost = KX.fpsBoost,
 			afkMode = KX.afkMode,
 			redeemedCodes = KX.redeemedCodes,
@@ -252,6 +258,12 @@ local function loadConfig()
 		if type(decoded.autoKen) == "boolean" then KX.autoKen = decoded.autoKen end
 		if type(decoded.autoRaceV3) == "boolean" then KX.autoRaceV3 = decoded.autoRaceV3 end
 		if type(decoded.smartServerHop) == "boolean" then KX.smartServerHop = decoded.smartServerHop end
+		if tonumber(decoded.tweenSpeed) then
+			KX.tweenSpeed = math.clamp(math.floor(tonumber(decoded.tweenSpeed)), 160, 210)
+		end
+		if type(decoded.noAttackAnimation) == "boolean" then
+			KX.noAttackAnimation = decoded.noAttackAnimation
+		end
 		if type(decoded.fpsBoost) == "boolean" then KX.fpsBoost = decoded.fpsBoost end
 		if type(decoded.afkMode) == "boolean" then KX.afkMode = decoded.afkMode end
 		if type(decoded.redeemedCodes) == "table" then
@@ -1049,6 +1061,7 @@ do
 	end
 
 	local lastPortalClock = 0
+	local lastStreamClock = 0
 	local lastTravelClock = 0
 	local lastQuestReqClock = 0
 	local lastAbandonClock = 0
@@ -1160,6 +1173,10 @@ do
 
 	function KX.ensureAntiFall(hrp)
 		if not hrp then return end
+		pcall(function()
+			hrp.AssemblyLinearVelocity = Vector3.zero
+			hrp.AssemblyAngularVelocity = Vector3.zero
+		end)
 		local bv = hrp:FindFirstChild("KX_AntiFall")
 		if not bv then
 			bv = Instance.new("BodyVelocity")
@@ -1257,11 +1274,20 @@ do
 		end
 
 		local dist = (hrp.Position - targetPos).Magnitude
-		if dist <= 18 then
+		if dist <= 16 then
 			KX.stopTween()
 			KX.ensureAntiFall(hrp)
 			hrp.CFrame = (targetPos == targetCF.Position) and targetCF or CFrame.new(targetPos)
 			return targetPos == targetCF.Position
+		end
+
+		-- Pre-stream far target chunks so streaming lag never causes server rubberband
+		if dist > 600 and (os.clock() - lastStreamClock >= 2.5) then
+			lastStreamClock = os.clock()
+			local streamPos = targetPos
+			task.spawn(function()
+				pcall(function() LocalPlayer:RequestStreamAroundAsync(streamPos, 1) end)
+			end)
 		end
 
 		-- Smart Portal Shortcut in Sea 1 & Sea 3 ONLY when saving > 2,200 studs
@@ -1286,18 +1312,11 @@ do
 				hrp = KX.getRootAndHum()
 				if not hrp then return false end
 				dist = (hrp.Position - targetPos).Magnitude
-				if dist <= 30 and targetPos == targetCF.Position then
+				if dist <= 20 and targetPos == targetCF.Position then
 					hrp.CFrame = targetCF
 					return true
 				end
 			end
-		end
-
-		if dist <= 85 then
-			KX.stopTween()
-			KX.ensureAntiFall(hrp)
-			hrp.CFrame = (targetPos == targetCF.Position) and targetCF or CFrame.new(targetPos)
-			return targetPos == targetCF.Position
 		end
 
 		-- Sticky Tween: Keep current tween gliding smoothly if target hasn't shifted > 10 studs!
@@ -1308,7 +1327,7 @@ do
 			return false
 		end
 
-		local spd = customSpeed or 245
+		local spd = customSpeed or math.clamp(tonumber(KX.tweenSpeed) or 185, 160, 210)
 		local dur = math.max(0.15, dist / spd)
 		if KX.activeTween then
 			pcall(function() KX.activeTween:Cancel() end)
@@ -1552,17 +1571,67 @@ do
 		end
 	end
 
-	function KX.attackTarget(enemyModel, preferredWeaponCategory, exactToolName)
-		local hrp = KX.getRootAndHum()
-		local ePart = KX.getModelRoot(enemyModel)
-		if not hrp or not ePart then return end
+	function KX.suppressHitAnimations(hum)
+		if not KX.noAttackAnimation then return end
+		if not hum then
+			local ch = LocalPlayer.Character
+			hum = ch and ch:FindFirstChildOfClass("Humanoid")
+		end
+		if not hum then return end
 
-		KX.ensureModulesReady(false)
-		KX.ensureCombatBuffs()
+		if CombatUtil and type(CombatUtil.GetMovesetAnimCache) == "function" then
+			pcall(function()
+				local cache = CombatUtil:GetMovesetAnimCache(hum)
+				if type(cache) == "table" then
+					for k, wrap in pairs(cache) do
+						local ks = tostring(k)
+						if ks:find("-basic", 1, true)
+							or ks:find("-Shoot", 1, true)
+							or ks:find("-Reload", 1, true)
+							or ks:find("-SmallReload", 1, true) then
+							local tr = (type(wrap) == "table" and wrap._Object) or wrap
+							if typeof(tr) == "Instance" and tr:IsA("AnimationTrack") and tr.IsPlaying then
+								tr:Stop(0)
+							end
+						end
+					end
+				end
+			end)
+		end
 
-		KX.lastAimEnemy = enemyModel
-		KX.lastAimPart = ePart
-		KX.lastAimPos = ePart.Position
+		local animator = hum:FindFirstChildOfClass("Animator")
+		if animator then
+			pcall(function()
+				for _, tr in ipairs(animator:GetPlayingAnimationTracks()) do
+					local tName = tostring(tr.Name or "")
+					local tLow = tName:lower()
+					if tName:find("-basic", 1, true)
+						or tName:find("-Shoot", 1, true)
+						or tName:find("-Reload", 1, true)
+						or tName:find("-SmallReload", 1, true)
+						or tLow:find("slash", 1, true)
+						or tLow:find("swing", 1, true)
+						or tLow:find("punch", 1, true)
+						or (
+							not tr.Looped
+							and tr.Priority == Enum.AnimationPriority.Action
+							and not tLow:find("idle", 1, true)
+							and not tLow:find("equip", 1, true)
+						) then
+						tr:Stop(0)
+					end
+				end
+			end)
+		end
+	end
+
+	function KX.fireWeaponClick(tool, enemyModel, ePart)
+		local hrp, hum = KX.getRootAndHum()
+		if not hrp or not hum or not ePart or not ePart.Parent then return end
+
+		local interval = math.clamp(tonumber(KX.attackInterval) or 0.095, 0.075, 0.25)
+		if os.clock() - lastAttackClock < interval then return end
+		lastAttackClock = os.clock()
 
 		if MouseModule then
 			pcall(function()
@@ -1574,23 +1643,6 @@ do
 			end)
 		end
 
-		local hoverCF = CFrame.lookAt(ePart.Position + Vector3.new(0, 19, 0), ePart.Position)
-		if (hrp.Position - hoverCF.Position).Magnitude > 85 then
-			KX.moveToCFrame(hoverCF)
-			return
-		end
-		KX.stopTween()
-		KX.ensureAntiFall(hrp)
-		hrp.CFrame = hoverCF
-
-		local tool = nil
-		if exactToolName then
-			tool = KX.hasToolAnywhere(exactToolName)
-			if tool then KX.equipExactTool(tool) end
-		end
-		if not tool then
-			tool = KX.equipCategory(preferredWeaponCategory or "Melee")
-		end
 		if tool then
 			local mp = tool:FindFirstChild("MousePos")
 			if mp and mp:IsA("Vector3Value") then
@@ -1598,26 +1650,52 @@ do
 			end
 		end
 
-		if os.clock() - lastAttackClock >= 0.13 then
-			lastAttackClock = os.clock()
-			local extraHits = {}
-			local enemies = Workspace:FindFirstChild("Enemies")
-			if enemies then
-				for _, m in ipairs(enemies:GetChildren()) do
-					if m ~= enemyModel and m:IsA("Model") and KX.isModelAlive(m) and #extraHits < 3 then
-						local p2 = KX.getModelRoot(m)
-						if p2 and (p2.Position - ePart.Position).Magnitude <= 45 then
-							table.insert(extraHits, {m, p2})
-						end
+		local extraHits = {}
+		local enemies = Workspace:FindFirstChild("Enemies")
+		if enemies then
+			for _, m in ipairs(enemies:GetChildren()) do
+				if m ~= enemyModel and m:IsA("Model") and KX.isModelAlive(m) and #extraHits < 3 then
+					local p2 = KX.getModelRoot(m)
+					if p2 and (p2.Position - ePart.Position).Magnitude <= 45 then
+						table.insert(extraHits, {m, p2})
 					end
 				end
 			end
+		end
 
+		local tip = tool and tostring(tool.ToolTip or "") or ""
+		local wt = tool and tostring(tool:GetAttribute("WeaponType") or "") or ""
+		local isGun = (tip == "Gun" or wt == "Gun")
+		local isFruit = (tip == "Blox Fruit" or wt == "Demon Fruit" or wt == "Blox Fruit")
+
+		if isGun then
 			pcall(function()
 				if CombatController and type(CombatController.Attack) == "function" and tool then
 					CombatController:Attack(tool, FakeInput)
 				end
 			end)
+		elseif isFruit then
+			pcall(function()
+				local lcr = tool and tool:FindFirstChild("LeftClickRemote")
+				if lcr and lcr:IsA("RemoteEvent") then
+					local dir = (ePart.Position - hrp.Position)
+					lcr:FireServer(dir.Magnitude > 0.01 and dir.Unit or Vector3.new(0, -1, 0), 1)
+				end
+				if CombatController and type(CombatController.Attack) == "function" and tool then
+					CombatController:Attack(tool, FakeInput)
+				end
+				if tool then tool:Activate() end
+			end)
+		else
+			-- Melee / Sword: When noAttackAnimation is ON, send direct server combo hits
+			-- so client swing animations, camera shake & forward lunge never trigger!
+			if not KX.noAttackAnimation then
+				pcall(function()
+					if CombatController and type(CombatController.Attack) == "function" and tool then
+						CombatController:Attack(tool, FakeInput)
+					end
+				end)
+			end
 
 			pcall(function()
 				if not cachedRegAttack or not cachedRegAttack.Parent then
@@ -1634,12 +1712,45 @@ do
 					cachedSendHits:FireServer(ePart, extraHits)
 				end
 			end)
-
-			pcall(function()
-				VirtualUser:CaptureController()
-				VirtualUser:Button1Down(Vector2.new(640, 360))
-			end)
 		end
+
+		if KX.noAttackAnimation then
+			KX.suppressHitAnimations(hum)
+		end
+	end
+
+	function KX.attackTarget(enemyModel, preferredWeaponCategory, exactToolName)
+		local hrp = KX.getRootAndHum()
+		local ePart = KX.getModelRoot(enemyModel)
+		if not hrp or not ePart then return end
+
+		KX.ensureModulesReady(false)
+		KX.ensureCombatBuffs()
+
+		KX.lastAimEnemy = enemyModel
+		KX.lastAimPart = ePart
+		KX.lastAimPos = ePart.Position
+
+		local hoverCF = CFrame.lookAt(ePart.Position + Vector3.new(0, 19, 0), ePart.Position)
+		if (hrp.Position - hoverCF.Position).Magnitude > 22 then
+			KX.moveToCFrame(hoverCF)
+			return
+		end
+		KX.stopTween()
+		KX.ensureAntiFall(hrp)
+		hrp.CFrame = hoverCF
+
+		local tool = nil
+		if exactToolName then
+			tool = KX.hasToolAnywhere(exactToolName)
+			if tool then KX.equipExactTool(tool) end
+		end
+		if not tool then
+			tool = KX.equipCategory(preferredWeaponCategory or "Melee")
+		end
+		KX.lastCombatTool = tool
+
+		KX.fireWeaponClick(tool, enemyModel, ePart)
 
 		-- Weave Z / X skills gently when fighting bosses or leveling sword/melee mastery
 		if (os.clock() - lastSkillClock >= 3.2) and tool and (tool.ToolTip == "Melee" or tool.ToolTip == "Sword") then
@@ -3014,7 +3125,7 @@ do
 						if KX.moveToCFrame(CFrame.new(heroPos)) then
 							pcall(function() CommF_:InvokeServer("BuyElectricClaw", "Start") end)
 							task.wait(0.3)
-							KX.moveToCFrame(CFrame.new(mansionPos), 320)
+							KX.moveToCFrame(CFrame.new(mansionPos), 205)
 						end
 						return
 					end
@@ -4465,6 +4576,8 @@ do
 	setAutoFarmUI = addPurpleCheckbox(BoxFarming, "⚡ Auto Farm (All-In-One Kaitun)", KX.autoFarm, 1, function(enabled)
 		KX.autoFarm = enabled
 		if not enabled then
+			KX.lastAimEnemy = nil
+			KX.lastAimPart = nil
 			KX.stopTween()
 			setStatus("⏸️ Idle (Paused)", "Standby")
 		else
@@ -4527,22 +4640,69 @@ do
 		end
 	end)
 
-	addPurpleCheckbox(BoxCoreCfg, "🚀 Smart 2x EXP Codes", KX.smart2xExpCodes, 2, function(v)
+	local function getSpeedLabelText(spd)
+		if spd <= 170 then
+			return "✈️ Velocidad : 🐢 Segura (" .. tostring(spd) .. ") [Click]"
+		elseif spd >= 200 then
+			return "✈️ Velocidad : ⚡ Rápida (" .. tostring(spd) .. ") [Click]"
+		end
+		return "✈️ Velocidad : ⚖️ Moderada (" .. tostring(spd) .. ") [Click]"
+	end
+
+	local SpeedBtn = Instance.new("TextButton")
+	SpeedBtn.Size = UDim2.new(1, 0, 0, 24)
+	SpeedBtn.BackgroundColor3 = THEME.CheckBg
+	SpeedBtn.BorderSizePixel = 0
+	SpeedBtn.LayoutOrder = 2
+	SpeedBtn.Font = Enum.Font.RobotoMono
+	SpeedBtn.TextSize = 11
+	SpeedBtn.TextColor3 = THEME.AccentBright
+	SpeedBtn.Text = getSpeedLabelText(KX.tweenSpeed)
+	SpeedBtn.ZIndex = 4
+	SpeedBtn.Parent = BoxCoreCfg
+	local spCorner = Instance.new("UICorner")
+	spCorner.CornerRadius = UDim.new(0, 4)
+	spCorner.Parent = SpeedBtn
+	local spStroke = Instance.new("UIStroke")
+	spStroke.Color = THEME.BorderBox
+	spStroke.Thickness = 1
+	spStroke.Parent = SpeedBtn
+
+	connect(SpeedBtn.MouseButton1Click, function()
+		if KX.tweenSpeed <= 170 then
+			KX.tweenSpeed = 185
+		elseif KX.tweenSpeed < 200 then
+			KX.tweenSpeed = 205
+		else
+			KX.tweenSpeed = 165
+		end
+		SpeedBtn.Text = getSpeedLabelText(KX.tweenSpeed)
+		if KX.activeTween then
+			pcall(function() KX.activeTween:Cancel() end)
+			KX.activeTween = nil
+		end
+		saveConfig()
+	end)
+
+	addPurpleCheckbox(BoxCoreCfg, "🚫 Sin Animación de Golpe (No Hit Anim)", KX.noAttackAnimation, 3, function(v)
+		KX.noAttackAnimation = v; saveConfig()
+	end)
+	addPurpleCheckbox(BoxCoreCfg, "🚀 Smart 2x EXP Codes", KX.smart2xExpCodes, 4, function(v)
 		KX.smart2xExpCodes = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "📊 Auto Stats (Melee/Def/Sword)", KX.autoStats, 3, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "📊 Auto Stats (Melee/Def/Sword)", KX.autoStats, 5, function(v)
 		KX.autoStats = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🛡️ Auto Buso Haki", KX.autoBuso, 4, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🛡️ Auto Buso Haki", KX.autoBuso, 6, function(v)
 		KX.autoBuso = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "👁️ Auto Ken (Observation)", KX.autoKen, 5, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "👁️ Auto Ken (Observation)", KX.autoKen, 7, function(v)
 		KX.autoKen = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "⚡ Auto Race V3", KX.autoRaceV3, 6, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "⚡ Auto Race V3", KX.autoRaceV3, 8, function(v)
 		KX.autoRaceV3 = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🌐 Smart Server Hop", KX.smartServerHop, 7, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🌐 Smart Server Hop", KX.smartServerHop, 9, function(v)
 		KX.smartServerHop = v; saveConfig()
 	end)
 
@@ -4774,7 +4934,7 @@ connect(RunService.Stepped, function()
 	local ch = LocalPlayer.Character
 	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
 
-	-- NoClip & Infinite Energy while Auto Farm is active
+	-- NoClip, Hit Animation Suppression & Infinite Energy while Auto Farm is active
 	if KX.autoFarm and ch then
 		for _, p in ipairs(ch:GetDescendants()) do
 			if p:IsA("BasePart") and p.CanCollide then
@@ -4784,6 +4944,9 @@ connect(RunService.Stepped, function()
 		local en = ch:FindFirstChild("Energy")
 		if en and en:IsA("ValueBase") and tonumber(en.MaxValue) then
 			en.Value = en.MaxValue
+		end
+		if KX.noAttackAnimation and hum then
+			KX.suppressHitAnimations(hum)
 		end
 	end
 
@@ -4804,6 +4967,37 @@ task.spawn(function()
 	while isAlive() do
 		pcall(function() KX.scanPlayerState(false) end)
 		task.wait(2.5)
+	end
+end)
+
+-- Dedicated Moderate Fast-Click Combat Loop (~10.5 clicks/sec, smooth & safe)
+task.spawn(function()
+	while isAlive() do
+		if KX.autoFarm and KX.lastAimEnemy then
+			pcall(function()
+				local enemy = KX.lastAimEnemy
+				if enemy and KX.isModelAlive(enemy) then
+					local hrp, hum = KX.getRootAndHum()
+					local ePart = KX.getModelRoot(enemy)
+					if hrp and hum and ePart then
+						local hoverPos = ePart.Position + Vector3.new(0, 19, 0)
+						if (hrp.Position - hoverPos).Magnitude <= 26 then
+							KX.ensureAntiFall(hrp)
+							hrp.CFrame = CFrame.lookAt(hoverPos, ePart.Position)
+							local ch = LocalPlayer.Character
+							local tool = (ch and ch:FindFirstChildOfClass("Tool")) or KX.lastCombatTool
+							KX.fireWeaponClick(tool, enemy, ePart)
+						end
+					end
+				else
+					KX.lastAimEnemy = nil
+					KX.lastAimPart = nil
+				end
+			end)
+			task.wait(math.clamp(tonumber(KX.attackInterval) or 0.095, 0.08, 0.20))
+		else
+			task.wait(0.18)
+		end
 	end
 end)
 
