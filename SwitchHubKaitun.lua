@@ -114,12 +114,22 @@ local KX = {
 	awakenedText = "-",
 	eliteProgress = 0,
 
-	-- Live Ownership Maps
+	-- Live Ownership Maps & Real-Time Weapon Telemetry
+	currentMeleeToolName = "None",
+	currentMeleeCanon = "None",
+	currentMeleeIcon = "🥊",
+	currentMeleeLevel = 0,
+	currentMeleeExp = 0,
+	currentMeleeMaxExp = 1,
+	currentMeleePct = 0,
 	ownedMelees = {},
 	meleeMastery = {},
+	meleeExp = {},
+	meleeMaxExp = {},
 	ownedSwords = {},
 	swordMastery = {},
 	ownedGuns = {},
+	gunMastery = {},
 	ownedAccessories = {},
 	materials = {
 		["Bones"] = 0,
@@ -150,11 +160,15 @@ local KX = {
 
 	-- Navigation & Combat Runtime
 	activeTween = nil,
+	activeTweenTargetPos = nil,
 	lastAimEnemy = nil,
 	lastAimPart = nil,
 	lastAimPos = nil,
 	protectedTool = nil,
 	failedStoreCooldown = {},
+	fruitAttemptStart = {},
+	ignoredFruits = {},
+	styleSwitchCooldown = {},
 	uiRefreshCallbacks = {},
 }
 
@@ -206,6 +220,10 @@ local function saveConfig()
 			fpsBoost = KX.fpsBoost,
 			afkMode = KX.afkMode,
 			redeemedCodes = KX.redeemedCodes,
+			ownedMelees = KX.ownedMelees,
+			meleeMastery = KX.meleeMastery,
+			meleeExp = KX.meleeExp,
+			meleeMaxExp = KX.meleeMaxExp,
 		}
 		writefile(CONFIG_FILE, HttpService:JSONEncode(payload))
 	end)
@@ -239,6 +257,29 @@ local function loadConfig()
 		if type(decoded.redeemedCodes) == "table" then
 			for k, v in pairs(decoded.redeemedCodes) do
 				if v then KX.redeemedCodes[tostring(k)] = true end
+			end
+		end
+		if type(decoded.ownedMelees) == "table" then
+			for k, v in pairs(decoded.ownedMelees) do
+				if v then KX.ownedMelees[tostring(k)] = true end
+			end
+		end
+		if type(decoded.meleeMastery) == "table" then
+			for k, v in pairs(decoded.meleeMastery) do
+				local n = tonumber(v)
+				if n and n > 0 then KX.meleeMastery[tostring(k)] = n end
+			end
+		end
+		if type(decoded.meleeExp) == "table" then
+			for k, v in pairs(decoded.meleeExp) do
+				local n = tonumber(v)
+				if n and n >= 0 then KX.meleeExp[tostring(k)] = n end
+			end
+		end
+		if type(decoded.meleeMaxExp) == "table" then
+			for k, v in pairs(decoded.meleeMaxExp) do
+				local n = tonumber(v)
+				if n and n > 0 then KX.meleeMaxExp[tostring(k)] = n end
 			end
 		end
 	end)
@@ -485,45 +526,50 @@ do
 end
 
 --------------------------------------------------------------------------------
--- 4. CANONICAL ITEM LISTS, SMART 2x EXP CODES & LIVE INVENTORY SCANNER
+-- 4. CANONICAL ITEM LISTS, SMART 2x EXP CODES & REAL-TIME MELEE/EXP SCANNER
 --------------------------------------------------------------------------------
-local MELEE_LIST = {
-	"Superhuman",
-	"Death Step",
-	"Sharkman Karate",
-	"Electric Claw",
-	"Dragon Talon",
-	"Godhuman",
+local MELEE_ENTRIES = {
+	{ui = "Dark Step", icon = "🦵", keys = {"Black Leg", "Dark Step"}},
+	{ui = "Electro", icon = "⚡", keys = {"Electro", "Electric"}},
+	{ui = "Water Kung Fu", icon = "🌊", keys = {"Fishman Karate", "Water Kung Fu"}},
+	{ui = "Dragon Breath", icon = "🐉", keys = {"Dragon Claw", "Dragon Breath"}},
+	{ui = "Superhuman", icon = "💥", keys = {"Superhuman"}},
+	{ui = "Death Step", icon = "🔥", keys = {"Death Step"}},
+	{ui = "Sharkman Karate", icon = "🦈", keys = {"Sharkman Karate"}},
+	{ui = "Electric Claw", icon = "🌩️", keys = {"Electric Claw"}},
+	{ui = "Dragon Talon", icon = "🐲", keys = {"Dragon Talon"}},
+	{ui = "Godhuman", icon = "🌟", keys = {"Godhuman"}},
+	{ui = "Sanguine Art", icon = "🩸", keys = {"Sanguine Art"}},
 }
 
 local SWORD_LIST = {
-	{ui = "Saber", keys = {"Saber"}},
-	{ui = "Bisento", keys = {"Bisento"}},
-	{ui = "Soul Cane", keys = {"Soul Cane"}},
-	{ui = "Rengoku", keys = {"Rengoku"}},
-	{ui = "Yama", keys = {"Yama"}},
-	{ui = "Koko", keys = {"Koko"}},
-	{ui = "Spikey Trident", keys = {"Spikey Trident"}},
-	{ui = "Buddy Sword", keys = {"Buddy Sword"}},
-	{ui = "Canvander", keys = {"Canvander", "Cavender"}},
-	{ui = "Tushita", keys = {"Tushita"}},
-	{ui = "Hallow Scythe", keys = {"Hallow Scythe"}},
-	{ui = "Midnight Blade", keys = {"Midnight Blade"}},
-	{ui = "Shizu", keys = {"Shizu", "Shisui"}},
-	{ui = "Saishi", keys = {"Saishi", "Saddi"}},
-	{ui = "Oroshi", keys = {"Oroshi", "Wando"}},
-	{ui = "Dark Dagger", keys = {"Dark Dagger"}},
-	{ui = "True Triple Katana", keys = {"True Triple Katana"}},
-	{ui = "Cursed Dual Katana", keys = {"Cursed Dual Katana"}},
+	{ui = "Saber", icon = "🗡️", keys = {"Saber"}},
+	{ui = "Bisento", icon = "🔱", keys = {"Bisento"}},
+	{ui = "Soul Cane", icon = "🦯", keys = {"Soul Cane"}},
+	{ui = "Rengoku", icon = "🔥", keys = {"Rengoku"}},
+	{ui = "Yama", icon = "👹", keys = {"Yama"}},
+	{ui = "Koko", icon = "⚡", keys = {"Koko"}},
+	{ui = "Spikey Trident", icon = "🍩", keys = {"Spikey Trident"}},
+	{ui = "Buddy Sword", icon = "🎀", keys = {"Buddy Sword"}},
+	{ui = "Canvander", icon = "🌸", keys = {"Canvander", "Cavender"}},
+	{ui = "Tushita", icon = "✨", keys = {"Tushita"}},
+	{ui = "Hallow Scythe", icon = "💀", keys = {"Hallow Scythe"}},
+	{ui = "Midnight Blade", icon = "🌑", keys = {"Midnight Blade"}},
+	{ui = "Shizu", icon = "💧", keys = {"Shizu", "Shisui"}},
+	{ui = "Saishi", icon = "🍃", keys = {"Saishi", "Saddi"}},
+	{ui = "Oroshi", icon = "🌪️", keys = {"Oroshi", "Wando"}},
+	{ui = "Dark Dagger", icon = "🗡️", keys = {"Dark Dagger"}},
+	{ui = "True Triple Katana", icon = "⚔️", keys = {"True Triple Katana"}},
+	{ui = "Cursed Dual Katana", icon = "🩸", keys = {"Cursed Dual Katana"}},
 }
 
 local GUN_LIST = {
-	{ui = "Soul Guitar", keys = {"Soul Guitar", "Skull Guitar"}},
-	{ui = "Venom Bow", keys = {"Venom Bow"}},
-	{ui = "Kabucha", keys = {"Kabucha"}},
-	{ui = "Acidum Rifle", keys = {"Acidum Rifle"}},
-	{ui = "Serpent Bow", keys = {"Serpent Bow"}},
-	{ui = "Bizarre Rifle", keys = {"Bizarre Rifle"}},
+	{ui = "Soul Guitar", icon = "🎸", keys = {"Soul Guitar", "Skull Guitar"}},
+	{ui = "Venom Bow", icon = "🏹", keys = {"Venom Bow"}},
+	{ui = "Kabucha", icon = "🎯", keys = {"Kabucha"}},
+	{ui = "Acidum Rifle", icon = "🧪", keys = {"Acidum Rifle"}},
+	{ui = "Serpent Bow", icon = "🐍", keys = {"Serpent Bow"}},
+	{ui = "Bizarre Rifle", icon = "🔮", keys = {"Bizarre Rifle"}},
 }
 
 -- Strictly 2x EXP codes ONLY (NO stat reset codes included!)
@@ -567,6 +613,149 @@ local EXP_CODES_ORDERED = {
 }
 
 do
+	local MELEE_ALIAS_MAP = {
+		["combat"] = {ui = "Combat", icon = "👊"},
+	}
+	for _, entry in ipairs(MELEE_ENTRIES) do
+		MELEE_ALIAS_MAP[entry.ui:lower()] = entry
+		for _, k in ipairs(entry.keys) do
+			MELEE_ALIAS_MAP[k:lower()] = entry
+		end
+	end
+
+	function KX.resolveMeleeCanonical(rawName)
+		local clean = tostring(rawName or ""):gsub("^%s+", ""):gsub("%s+$", "")
+		local hit = MELEE_ALIAS_MAP[clean:lower()]
+		if hit then
+			return hit.ui, hit.icon
+		end
+		return clean ~= "" and clean or "None", "🥊"
+	end
+
+	function KX.calcMasteryMaxExp(lvl)
+		lvl = math.max(1, tonumber(lvl) or 1)
+		if lvl >= 600 then
+			return 0
+		end
+		return math.floor((lvl ^ 2.26) + 69)
+	end
+
+	local function parseHudEquippedExpPair()
+		local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+		if not pgui then return nil, nil end
+		local mainGui = pgui:FindFirstChild("Main") or pgui:FindFirstChild("Main (minimal)")
+		if not mainGui then return nil, nil end
+		local candidates = {}
+		local sk = mainGui:FindFirstChild("Skills")
+		if sk and sk:FindFirstChild("Level") and sk.Level:FindFirstChild("Exp") then
+			table.insert(candidates, sk.Level.Exp)
+		end
+		local mob = mainGui:FindFirstChild("MobileMasteryLevel")
+		if mob and mob:FindFirstChild("Exp") then
+			table.insert(candidates, mob.Exp)
+		end
+		for _, lbl in ipairs(candidates) do
+			if lbl:IsA("TextLabel") then
+				local cleaned = tostring(lbl.Text or ""):gsub(",", ""):gsub("%s+", "")
+				local cStr, mStr = cleaned:match("(%d+)/(%d+)")
+				local cNum, mNum = tonumber(cStr), tonumber(mStr)
+				if cNum and mNum and mNum > 0 then
+					return cNum, mNum
+				end
+			end
+		end
+		return nil, nil
+	end
+
+	-- Fast zero-yield scanner (safe to call every 0.3s for real-time Melee & EXP UI)
+	KX.scanRealtimeMeleeAndWeapons = function()
+		local char = LocalPlayer.Character
+		local bp = LocalPlayer:FindFirstChild("Backpack")
+		local foundActiveMelee = nil
+		local activeInChar = false
+
+		for idx, container in ipairs({char, bp}) do
+			if container then
+				for _, t in ipairs(container:GetChildren()) do
+					if t:IsA("Tool") then
+						local lvObj = t:FindFirstChild("Level")
+						local expObj = t:FindFirstChild("Exp")
+						local mast = (lvObj and tonumber(lvObj.Value)) or tonumber(t:GetAttribute("Level")) or 0
+						local expVal = (expObj and tonumber(expObj.Value)) or tonumber(t:GetAttribute("Exp")) or 0
+
+						if t.ToolTip == "Melee" then
+							if not foundActiveMelee then
+								foundActiveMelee = t
+								activeInChar = (idx == 1)
+							end
+							local canonName, canonIcon = KX.resolveMeleeCanonical(t.Name)
+							local maxExpVal = KX.calcMasteryMaxExp(mast)
+							if activeInChar then
+								local hudCur, hudMax = parseHudEquippedExpPair()
+								if hudCur and hudMax and math.abs(hudCur - expVal) <= 5 then
+									maxExpVal = hudMax
+								end
+							elseif (KX.meleeMaxExp[canonName] or 0) > 0 and (KX.meleeMastery[canonName] == mast) then
+								maxExpVal = KX.meleeMaxExp[canonName]
+							end
+
+							KX.ownedMelees[t.Name] = true
+							KX.ownedMelees[canonName] = true
+							KX.meleeMastery[t.Name] = math.max(KX.meleeMastery[t.Name] or 0, mast)
+							KX.meleeMastery[canonName] = math.max(KX.meleeMastery[canonName] or 0, mast)
+							KX.meleeExp[canonName] = math.floor(expVal)
+							KX.meleeMaxExp[canonName] = maxExpVal
+
+							if t == foundActiveMelee then
+								KX.currentMeleeToolName = t.Name
+								KX.currentMeleeCanon = canonName
+								KX.currentMeleeIcon = canonIcon
+								KX.currentMeleeLevel = mast
+								KX.currentMeleeExp = math.floor(expVal)
+								KX.currentMeleeMaxExp = maxExpVal
+								if mast >= 600 then
+									KX.currentMeleePct = 100
+								elseif maxExpVal > 0 then
+									KX.currentMeleePct = math.clamp((expVal / maxExpVal) * 100, 0, 100)
+								else
+									KX.currentMeleePct = 0
+								end
+							end
+						elseif t.ToolTip == "Sword" then
+							KX.ownedSwords[t.Name] = true
+							KX.swordMastery[t.Name] = math.max(KX.swordMastery[t.Name] or 0, mast)
+						elseif t.ToolTip == "Gun" then
+							KX.ownedGuns[t.Name] = true
+							KX.gunMastery[t.Name] = math.max(KX.gunMastery[t.Name] or 0, mast)
+						end
+					end
+				end
+			end
+		end
+
+		-- Match Sword/Gun aliases onto UI canonical names continuously
+		for _, entry in ipairs(SWORD_LIST) do
+			for _, k in ipairs(entry.keys) do
+				if KX.ownedSwords[k] then
+					KX.ownedSwords[entry.ui] = true
+					if (KX.swordMastery[k] or 0) > (KX.swordMastery[entry.ui] or 0) then
+						KX.swordMastery[entry.ui] = KX.swordMastery[k]
+					end
+				end
+			end
+		end
+		for _, entry in ipairs(GUN_LIST) do
+			for _, k in ipairs(entry.keys) do
+				if KX.ownedGuns[k] then
+					KX.ownedGuns[entry.ui] = true
+					if (KX.gunMastery[k] or 0) > (KX.gunMastery[entry.ui] or 0) then
+						KX.gunMastery[entry.ui] = KX.gunMastery[k]
+					end
+				end
+			end
+		end
+	end
+
 	local function parseHud2xExpSeconds()
 		local pgui = LocalPlayer:FindFirstChild("PlayerGui")
 		if not pgui then return 0 end
@@ -664,28 +853,7 @@ do
 			if df then KX.devilFruit = (tostring(df.Value) ~= "" and tostring(df.Value)) or "None" end
 		end
 
-		-- Scan Backpack + Character tools for equipped/held Melees, Swords, Guns, Keys & Mastery
-		local char = LocalPlayer.Character
-		local bp = LocalPlayer:FindFirstChild("Backpack")
-		for _, container in ipairs({char, bp}) do
-			if container then
-				for _, t in ipairs(container:GetChildren()) do
-					if t:IsA("Tool") then
-						local lvObj = t:FindFirstChild("Level")
-						local mast = (lvObj and tonumber(lvObj.Value)) or tonumber(t:GetAttribute("Level")) or 0
-						if t.ToolTip == "Melee" then
-							KX.ownedMelees[t.Name] = true
-							KX.meleeMastery[t.Name] = math.max(KX.meleeMastery[t.Name] or 0, mast)
-						elseif t.ToolTip == "Sword" then
-							KX.ownedSwords[t.Name] = true
-							KX.swordMastery[t.Name] = math.max(KX.swordMastery[t.Name] or 0, mast)
-						elseif t.ToolTip == "Gun" then
-							KX.ownedGuns[t.Name] = true
-						end
-					end
-				end
-			end
-		end
+		KX.scanRealtimeMeleeAndWeapons()
 
 		if isChooseTeamScreenOpen() or not CommF_ then
 			return
@@ -722,6 +890,7 @@ do
 							KX.swordMastery[iName] = math.max(KX.swordMastery[iName] or 0, mast)
 						elseif iType == "Gun" then
 							KX.ownedGuns[iName] = true
+							KX.gunMastery[iName] = math.max(KX.gunMastery[iName] or 0, mast)
 						elseif iType == "Wear" or iType == "Accessory" then
 							KX.ownedAccessories[iName] = true
 						elseif iType == "Material" then
@@ -741,24 +910,7 @@ do
 			end
 		end)
 
-		-- Match Sword/Gun aliases onto UI canonical names
-		for _, entry in ipairs(SWORD_LIST) do
-			for _, k in ipairs(entry.keys) do
-				if KX.ownedSwords[k] then
-					KX.ownedSwords[entry.ui] = true
-					if (KX.swordMastery[k] or 0) > (KX.swordMastery[entry.ui] or 0) then
-						KX.swordMastery[entry.ui] = KX.swordMastery[k]
-					end
-				end
-			end
-		end
-		for _, entry in ipairs(GUN_LIST) do
-			for _, k in ipairs(entry.keys) do
-				if KX.ownedGuns[k] then
-					KX.ownedGuns[entry.ui] = true
-				end
-			end
-		end
+		KX.scanRealtimeMeleeAndWeapons()
 
 		if KX.ownedSwords["Saber"] then
 			KX.questsDone.saber = true
@@ -771,6 +923,7 @@ do
 		end
 		if KX.level >= 1500 and KX.worldNum >= 3 then
 			KX.questsDone.bartilo = true
+			KX.questsDone.donSwan = true
 			KX.questsDone.ripIndraSea2 = true
 		end
 
@@ -799,6 +952,15 @@ do
 
 		-- Fighting style ownership queries (non-buying check argument = true)
 		pcall(function()
+			if not KX.ownedMelees["Dark Step"] and CommF_:InvokeServer("BuyBlackLeg", true) == 1 then
+				KX.ownedMelees["Dark Step"] = true
+			end
+			if not KX.ownedMelees["Electro"] and CommF_:InvokeServer("BuyElectro", true) == 1 then
+				KX.ownedMelees["Electro"] = true
+			end
+			if not KX.ownedMelees["Water Kung Fu"] and CommF_:InvokeServer("BuyFishmanKarate", true) == 1 then
+				KX.ownedMelees["Water Kung Fu"] = true
+			end
 			if not KX.ownedMelees["Superhuman"] and CommF_:InvokeServer("BuySuperhuman", true) == 1 then
 				KX.ownedMelees["Superhuman"] = true
 			end
@@ -821,9 +983,12 @@ do
 			if not KX.ownedMelees["Godhuman"] and CommF_:InvokeServer("BuyGodhuman", true) == 1 then
 				KX.ownedMelees["Godhuman"] = true
 			end
+			if not KX.ownedMelees["Sanguine Art"] and CommF_:InvokeServer("BuySanguineArt", true) == 1 then
+				KX.ownedMelees["Sanguine Art"] = true
+			end
 		end)
 
-		-- Sea 2 Bartilo & Don Swan quest status
+		-- Sea 2 Bartilo, Don Swan & Rip Indra quest status
 		if KX.worldNum == 2 then
 			pcall(function()
 				if not KX.questsDone.bartilo then
@@ -838,6 +1003,12 @@ do
 						KX.questsDone.donSwan = true
 					end
 				end
+				if not KX.questsDone.ripIndraSea2 then
+					local zp = CommF_:InvokeServer("ZQuestProgress", "Check")
+					if tonumber(zp) == 1 then
+						KX.questsDone.ripIndraSea2 = true
+					end
+				end
 			end)
 		end
 	end
@@ -847,6 +1018,8 @@ end
 -- 5. NAVIGATION, SMART PORTALS, SERVER HOP, COMBAT & QUEST ENGINE
 --------------------------------------------------------------------------------
 do
+	-- Generic distance portals ONLY for open-world Sea 1 & Sea 3 hubs!
+	-- Sea 2 interiors (Don Swan Room & Cursed Ship) are handled deterministically by interior bounds so they NEVER rubberband!
 	local SEA_PORTALS = {
 		[1] = {
 			Vector3.new(-4651.8, 845.2, -1912.6),  -- Sky 1
@@ -854,12 +1027,7 @@ do
 			Vector3.new(61163.8, 11.7, 1819.7),    -- Underwater City
 			Vector3.new(3864.6, 6.7, -1926.2),     -- Whirlpool
 		},
-		[2] = {
-			Vector3.new(-286.9, 306.1, 597.7),     -- Swan Mansion
-			Vector3.new(2284.9, 15.2, 905.4),      -- Swan Room
-			Vector3.new(923.2, 126.9, 32852.8),    -- Cursed Ship Inside
-			Vector3.new(-6508.5, 89.0, -132.8),    -- Cursed Ship Deck
-		},
+		[2] = {},
 		[3] = {
 			Vector3.new(-5075.5, 314.5, -3150.0),  -- Castle on the Sea
 			Vector3.new(5756.8, 610.4, -253.9),    -- Hydra Island
@@ -867,6 +1035,18 @@ do
 			Vector3.new(28282.5, 14896.8, 105.1),  -- Temple of Time
 		},
 	}
+
+	local SWAN_ROOM_CENTER = Vector3.new(2288.8, 15.2, 905.5)
+	local CURSED_SHIP_INSIDE = Vector3.new(923.2, 126.9, 32852.8)
+	local CURSED_SHIP_OUTSIDE = Vector3.new(-6508.5, 89.0, -132.8)
+
+	function KX.isPosInSwanRoom(pos)
+		return pos ~= nil and ((pos - SWAN_ROOM_CENTER).Magnitude < 280) and (pos.Y < 55)
+	end
+
+	function KX.isPosInCursedShip(pos)
+		return pos ~= nil and (pos.Z > 20000)
+	end
 
 	local lastPortalClock = 0
 	local lastTravelClock = 0
@@ -968,6 +1148,7 @@ do
 			pcall(function() KX.activeTween:Cancel() end)
 			KX.activeTween = nil
 		end
+		KX.activeTweenTargetPos = nil
 		local hrp = KX.getRootAndHum()
 		if hrp then
 			local bv = hrp:FindFirstChild("KX_AntiFall")
@@ -991,6 +1172,23 @@ do
 		end
 	end
 
+	function KX.tryRequestPortalEntrance(destVec, touchPart)
+		local hrp = KX.getRootAndHum()
+		if hrp and touchPart and touchPart:IsA("BasePart") and firetouchinterest then
+			pcall(function()
+				firetouchinterest(hrp, touchPart, 0)
+				firetouchinterest(hrp, touchPart, 1)
+			end)
+		end
+		if CommF_ and destVec and (os.clock() - lastPortalClock >= 2.2) then
+			lastPortalClock = os.clock()
+			KX.stopTween()
+			pcall(function()
+				CommF_:InvokeServer("requestEntrance", destVec)
+			end)
+		end
+	end
+
 	function KX.moveToCFrame(targetCF, customSpeed)
 		local hrp, hum = KX.getRootAndHum()
 		if not hrp or not hum then return false end
@@ -1001,22 +1199,79 @@ do
 		end
 
 		local targetPos = targetCF.Position
-		local dist = (hrp.Position - targetPos).Magnitude
-		if dist <= 16 then
-			KX.stopTween()
-			KX.ensureAntiFall(hrp)
-			hrp.CFrame = targetCF
-			return true
+
+		-- Deterministic Sea 2 interior portal routing (Don Swan Room & Cursed Ship)
+		if KX.worldNum == 2 then
+			local playerInSwan = KX.isPosInSwanRoom(hrp.Position)
+			local targetInSwan = KX.isPosInSwanRoom(targetPos)
+			if playerInSwan and not targetInSwan then
+				local dress = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("Dressrosa")
+				local flamExit = dress and dress:FindFirstChild("FlamingoExit")
+				local flamEnt = dress and dress:FindFirstChild("FlamingoEntrance")
+				local exitDoorPos = (flamExit and flamExit:IsA("BasePart") and flamExit.Position) or Vector3.new(2284.9, 15.2, 905.5)
+				local outsidePos = (flamEnt and flamEnt:IsA("BasePart") and (flamEnt.CFrame * Vector3.new(0, 0, -6))) or Vector3.new(-287.5, 305.2, 586.0)
+				if (hrp.Position - exitDoorPos).Magnitude <= 32 then
+					hrp.CFrame = CFrame.new(exitDoorPos)
+					KX.tryRequestPortalEntrance(outsidePos, flamExit)
+					return false
+				end
+				targetPos = exitDoorPos
+			elseif targetInSwan and not playerInSwan and KX.questsDone.donSwan then
+				local dress = Workspace:FindFirstChild("Map") and Workspace.Map:FindFirstChild("Dressrosa")
+				local flamEnt = dress and dress:FindFirstChild("FlamingoEntrance")
+				local flamExit = dress and dress:FindFirstChild("FlamingoExit")
+				local entPos = (flamEnt and flamEnt:IsA("BasePart") and flamEnt.Position) or Vector3.new(-287.5, 305.2, 592.4)
+				local insidePos = (flamExit and flamExit:IsA("BasePart") and (flamExit.CFrame * Vector3.new(0, 0, -6))) or SWAN_ROOM_CENTER
+				if (hrp.Position - entPos).Magnitude <= 32 then
+					hrp.CFrame = CFrame.new(entPos)
+					KX.tryRequestPortalEntrance(insidePos, flamEnt)
+					return false
+				end
+				targetPos = entPos
+			else
+				local playerInShip = KX.isPosInCursedShip(hrp.Position)
+				local targetInShip = KX.isPosInCursedShip(targetPos)
+				if targetInShip and not playerInShip then
+					if CommF_ and (os.clock() - lastPortalClock >= 3.2) then
+						lastPortalClock = os.clock()
+						KX.stopTween()
+						pcall(function() CommF_:InvokeServer("requestEntrance", CURSED_SHIP_INSIDE) end)
+						task.wait(0.2)
+						hrp = KX.getRootAndHum()
+						if not hrp then return false end
+					end
+					if not KX.isPosInCursedShip(hrp.Position) then
+						targetPos = CURSED_SHIP_OUTSIDE
+					end
+				elseif playerInShip and not targetInShip then
+					if CommF_ and (os.clock() - lastPortalClock >= 3.2) then
+						lastPortalClock = os.clock()
+						KX.stopTween()
+						pcall(function() CommF_:InvokeServer("requestEntrance", CURSED_SHIP_OUTSIDE) end)
+						task.wait(0.2)
+						hrp = KX.getRootAndHum()
+						if not hrp then return false end
+					end
+				end
+			end
 		end
 
-		-- Smart Portal Shortcut if portal saves > 1,800 studs
+		local dist = (hrp.Position - targetPos).Magnitude
+		if dist <= 18 then
+			KX.stopTween()
+			KX.ensureAntiFall(hrp)
+			hrp.CFrame = (targetPos == targetCF.Position) and targetCF or CFrame.new(targetPos)
+			return targetPos == targetCF.Position
+		end
+
+		-- Smart Portal Shortcut in Sea 1 & Sea 3 ONLY when saving > 2,200 studs
 		local portals = SEA_PORTALS[KX.worldNum]
-		if portals and CommF_ and dist > 2600 and (os.clock() - lastPortalClock >= 4.0) then
+		if portals and #portals > 0 and CommF_ and dist > 3200 and (os.clock() - lastPortalClock >= 8.0) then
 			local bestPortal = nil
-			local bestRemDist = dist - 1200
+			local bestRemDist = dist - 2200
 			for _, pPos in ipairs(portals) do
 				local rem = (pPos - targetPos).Magnitude
-				if rem < bestRemDist then
+				if rem < bestRemDist and (hrp.Position - pPos).Magnitude > 450 then
 					bestRemDist = rem
 					bestPortal = pPos
 				end
@@ -1031,21 +1286,29 @@ do
 				hrp = KX.getRootAndHum()
 				if not hrp then return false end
 				dist = (hrp.Position - targetPos).Magnitude
-				if dist <= 30 then
+				if dist <= 30 and targetPos == targetCF.Position then
 					hrp.CFrame = targetCF
 					return true
 				end
 			end
 		end
 
-		if dist <= 95 then
+		if dist <= 85 then
 			KX.stopTween()
 			KX.ensureAntiFall(hrp)
-			hrp.CFrame = targetCF
-			return true
+			hrp.CFrame = (targetPos == targetCF.Position) and targetCF or CFrame.new(targetPos)
+			return targetPos == targetCF.Position
 		end
 
-		local spd = customSpeed or 235
+		-- Sticky Tween: Keep current tween gliding smoothly if target hasn't shifted > 10 studs!
+		if KX.activeTween
+			and KX.activeTween.PlaybackState == Enum.PlaybackState.Playing
+			and KX.activeTweenTargetPos
+			and (KX.activeTweenTargetPos - targetPos).Magnitude <= 10 then
+			return false
+		end
+
+		local spd = customSpeed or 245
 		local dur = math.max(0.15, dist / spd)
 		if KX.activeTween then
 			pcall(function() KX.activeTween:Cancel() end)
@@ -1056,6 +1319,7 @@ do
 			{CFrame = CFrame.new(targetPos)}
 		)
 		KX.activeTween = tw
+		KX.activeTweenTargetPos = targetPos
 		tw:Play()
 		return false
 	end
@@ -1163,19 +1427,28 @@ do
 			or m:FindFirstChildWhichIsA("BasePart")
 	end
 
-	function KX.findBossOrEnemy(namesList, checkRepStorage)
+	local function cleanEntityName(raw)
+		return tostring(raw or "")
+			:gsub("%s*%[Lv%.%s*%d+%]", "")
+			:gsub("%s*%[Boss%]", "")
+			:gsub("%s*%[Raid Boss%]", "")
+			:gsub("^%s+", "")
+			:gsub("%s+$", "")
+	end
+
+	-- Exact boss matcher: NEVER matches "Swan Pirate" when searching for "Don Swan"!
+	function KX.findExactBoss(exactNamesList, checkRepStorage)
 		local set = {}
-		for _, n in ipairs(namesList) do
-			set[n:lower()] = true
+		for _, n in ipairs(exactNamesList) do
+			set[cleanEntityName(n):lower()] = true
 		end
 		local enemies = Workspace:FindFirstChild("Enemies")
 		if enemies then
 			for _, m in ipairs(enemies:GetChildren()) do
 				if m:IsA("Model") and KX.isModelAlive(m) then
-					local low = m.Name:lower()
-					if set[low] then return m, true end
-					for k in pairs(set) do
-						if low:find(k, 1, true) then return m, true end
+					local cLow = cleanEntityName(m.Name):lower()
+					if set[cLow] then
+						return m, true
 					end
 				end
 			end
@@ -1183,15 +1456,18 @@ do
 		if checkRepStorage then
 			for _, m in ipairs(ReplicatedStorage:GetChildren()) do
 				if m:IsA("Model") and KX.isModelAlive(m) then
-					local low = m.Name:lower()
-					if set[low] then return m, false end
-					for k in pairs(set) do
-						if low:find(k, 1, true) then return m, false end
+					local cLow = cleanEntityName(m.Name):lower()
+					if set[cLow] then
+						return m, false
 					end
 				end
 			end
 		end
 		return nil, false
+	end
+
+	function KX.findBossOrEnemy(namesList, checkRepStorage)
+		return KX.findExactBoss(namesList, checkRepStorage)
 	end
 
 	function KX.findNearestAliveFromSet(mobSet)
@@ -1481,12 +1757,25 @@ do
 			return true, matches
 		end
 		local pgui = LocalPlayer:FindFirstChild("PlayerGui")
-		local tqf = pgui and pgui:FindFirstChild("TrackedQuestFrame")
-		local frm = tqf and tqf:FindFirstChild("Frame")
-		if tqf and tqf.Enabled and frm and frm.Visible then
-			local desc = (frm:FindFirstChild("description") and frm.description.Text or ""):lower()
-			if desc ~= "" then
-				return true, (not expectedMob or desc:find(expectedMob:lower(), 1, true) ~= nil)
+		if pgui then
+			local mainGui = pgui:FindFirstChild("Main") or pgui:FindFirstChild("Main (minimal)")
+			local qFrame = mainGui and mainGui:FindFirstChild("Quest")
+			if qFrame and qFrame:IsA("GuiObject") and qFrame.Visible then
+				local cont = qFrame:FindFirstChild("Container")
+				local qt = cont and cont:FindFirstChild("QuestTitle")
+				local titleLbl = qt and qt:FindFirstChild("Title")
+				local titleTxt = (titleLbl and tostring(titleLbl.Text or "") or ""):lower()
+				if titleTxt ~= "" then
+					return true, (not expectedMob or titleTxt:find(expectedMob:lower(), 1, true) ~= nil)
+				end
+			end
+			local tqf = pgui:FindFirstChild("TrackedQuestFrame")
+			local frm = tqf and tqf:FindFirstChild("Frame")
+			if tqf and tqf.Enabled and frm and frm.Visible then
+				local desc = (frm:FindFirstChild("description") and frm.description.Text or ""):lower()
+				if desc ~= "" then
+					return true, (not expectedMob or desc:find(expectedMob:lower(), 1, true) ~= nil)
+				end
 			end
 		end
 		return false, false
@@ -1586,18 +1875,32 @@ do
 		return base .. "-" .. base
 	end
 
-	function KX.stepFruitSpinStoreAndEat()
-		if not KX.autoFarm or isChooseTeamScreenOpen() or not CommF_ then return end
-
-		-- 1) Pick up spawned ground fruits safely when nearby/available
-		if KX.autoGrabGroundFruits then
-			local hrp = KX.getRootAndHum()
-			if hrp then
-				for _, obj in ipairs(Workspace:GetChildren()) do
-					if (obj:IsA("Tool") or obj:IsA("Model")) and obj.Name:lower():find("fruit") and not Players:GetPlayerFromCharacter(obj) then
-						local handle = obj:FindFirstChild("Handle")
-						if handle and handle:IsA("BasePart") and (handle.Position - hrp.Position).Magnitude <= 2500 then
-							setStatus("🍎 Recogiendo fruta del mapa: " .. tostring(obj.Name), "Fruit Grab")
+	-- Exclusive movement task for spawned map fruits (ONLY called during normal grinding and RETURNS true so zero concurrent movement happens!)
+	function KX.tryGrabGroundFruit(hrp)
+		if not KX.autoGrabGroundFruits or not hrp then
+			return false
+		end
+		local now = os.clock()
+		for _, obj in ipairs(Workspace:GetChildren()) do
+			local ignoreUntil = KX.ignoredFruits[obj]
+			if (not ignoreUntil or now >= ignoreUntil)
+				and (obj:IsA("Tool") or obj:IsA("Model"))
+				and obj.Name:lower():find("fruit")
+				and not Players:GetPlayerFromCharacter(obj) then
+				local handle = obj:FindFirstChild("Handle")
+				if handle and handle:IsA("BasePart") then
+					local dist = (handle.Position - hrp.Position).Magnitude
+					local unreachableSwan = (KX.worldNum == 2 and KX.isPosInSwanRoom(handle.Position) and not KX.isPosInSwanRoom(hrp.Position))
+					if dist <= 1800 and not unreachableSwan then
+						if not KX.fruitAttemptStart[obj] then
+							KX.fruitAttemptStart[obj] = now
+						elseif (now - KX.fruitAttemptStart[obj]) > 8.5 then
+							-- Timed out (stuck behind geometry or claimed) -> ignore for 3 mins so Kaitun never stalls!
+							KX.ignoredFruits[obj] = now + 180.0
+							KX.fruitAttemptStart[obj] = nil
+						else
+							KX.phaseText = "Bonus: Map Fruit Pickup"
+							setStatus("🍎 Recogiendo fruta del mapa: " .. tostring(obj.Name), KX.phaseText)
 							local reached = KX.moveToCFrame(handle.CFrame * CFrame.new(0, 2, 0))
 							if reached or (hrp.Position - handle.Position).Magnitude <= 18 then
 								hrp.CFrame = handle.CFrame
@@ -1607,15 +1910,23 @@ do
 										firetouchinterest(hrp, handle, 1)
 									end)
 								end
+								KX.ignoredFruits[obj] = now + 10.0
+								KX.fruitAttemptStart[obj] = nil
 							end
-							break
+							return true
 						end
 					end
 				end
 			end
 		end
+		return false
+	end
 
-		-- 2) Spin Random Fruit Gacha on cooldown (keeps reserve Beli if saving for a style)
+	-- Background NON-MOVING support step (Gacha spin + Store/Eat fruits in backpack)
+	function KX.stepFruitSpinStoreAndEat()
+		if not KX.autoFarm or isChooseTeamScreenOpen() or not CommF_ then return end
+
+		-- 1) Spin Random Fruit Gacha on cooldown (keeps reserve Beli if saving for a style)
 		if KX.autoSpinAndStoreFruits and KX.beli >= 350000 and (os.clock() - lastGachaClock >= 75.0) then
 			lastGachaClock = os.clock()
 			task.spawn(function()
@@ -2064,33 +2375,62 @@ do
 
 	function KX.stepPassiveMeleeRotation()
 		if KX.ownedMelees["Godhuman"] or not CommF_ then return end
-		if os.clock() - lastStyleCheckClock < 8.0 then return end
+		if os.clock() - lastStyleCheckClock < 15.0 then return end
 		lastStyleCheckClock = os.clock()
 
-		-- Check current equipped/backpack melee mastery
-		local curMelee = KX.equipCategory("Melee")
-		if curMelee then
-			local lvObj = curMelee:FindFirstChild("Level")
-			local curMast = (lvObj and tonumber(lvObj.Value)) or 0
-			KX.meleeMastery[curMelee.Name] = math.max(KX.meleeMastery[curMelee.Name] or 0, curMast)
-			if curMast > 0 and curMast < 400 and curMelee.Name ~= "Combat" then
-				return -- Keep leveling current non-starter style until 400!
-			end
+		KX.scanRealtimeMeleeAndWeapons()
+
+		-- Keep leveling current non-starter style until Mastery 400!
+		if KX.currentMeleeCanon ~= "None"
+			and KX.currentMeleeCanon ~= "Combat"
+			and KX.currentMeleeLevel > 0
+			and KX.currentMeleeLevel < 400 then
+			return
 		end
 
+		local now = os.clock()
 		for _, st in ipairs(STYLE_PIPELINE) do
-			if KX.worldNum >= st.minSea and KX.getStyleMastery(st) < st.reqMast then
+			local cdUntil = KX.styleSwitchCooldown[st.alt]
+			if KX.worldNum >= st.minSea
+				and KX.getStyleMastery(st) < st.reqMast
+				and (not cdUntil or now >= cdUntil) then
 				if KX.beli >= st.beli and KX.fragments >= st.frag then
 					pcall(function()
 						if st.isDragonClaw then
 							CommF_:InvokeServer("BlackbeardReward", "DragonClaw", "1")
 							CommF_:InvokeServer("BlackbeardReward", "DragonClaw", "2")
 						else
+							CommF_:InvokeServer(st.buyArg, true)
 							CommF_:InvokeServer(st.buyArg)
 						end
 					end)
+					task.wait(0.55)
+					KX.scanRealtimeMeleeAndWeapons()
+					saveConfig()
+					if KX.currentMeleeCanon ~= st.alt then
+						-- Teacher quest / prerequisites not unlocked yet -> cooldown 5 mins so it NEVER loops!
+						KX.styleSwitchCooldown[st.alt] = os.clock() + 300.0
+					end
 					return
 				end
+			end
+		end
+	end
+
+	function KX.stepStandardSeaLevelFarm(hrp, customLabel)
+		KX.stepPassiveMeleeRotation()
+		local qInfo = KX.getBestLevelQuest()
+		if qInfo then
+			if KX.ensureQuestAccepted(qInfo, hrp) then
+				local lbl = customLabel or ("⚔️ Farm Level [" .. tostring(KX.level) .. "]")
+				KX.farmMobSpawns(qInfo.mobName, qInfo.spawns, lbl, "Melee")
+			end
+		else
+			local mob = KX.findNearestAliveFromSet(CAKE_LAND_MOBS)
+			if mob then
+				KX.engageTarget(mob, CAKE_LAND_MOBS, customLabel or "⚔️ Farm Level (Cake Land)", "Melee")
+			else
+				KX.moveToCFrame(CFrame.new(-2095.0, 70.0, -12140.0))
 			end
 		end
 	end
@@ -2345,6 +2685,29 @@ do
 		end
 	end
 
+	local lastTrevorPoll = 0
+	local lastTrevorLoadAttempt = 0
+	local lastZProgPoll = 0
+	local cachedZProg = nil
+	local swanWasAlive = false
+	local swanEmptySince = 0
+	local s2IndraWasAlive = false
+	local lastZBeginInvoke = 0
+	local lastZTravelInvoke = 0
+
+	local TREVOR_SPARE_FRUITS = {
+		"Quake-Quake",
+		"Love-Love",
+		"Creation-Creation",
+		"Spider-Spider",
+		"Sound-Sound",
+		"Phoenix-Phoenix",
+		"Pain-Pain",
+		"Blizzard-Blizzard",
+		"Shadow-Shadow",
+		"Gravity-Gravity",
+	}
+
 	function KX.stepSea2ToSea3Quest(hrp)
 		KX.phaseText = "Tier 2: Sea 2 -> Sea 3 Unlock"
 		if not KX.questsDone.bartilo then
@@ -2352,8 +2715,9 @@ do
 			return
 		end
 
-		-- Check Trevor / FlamingoAccess -> Don Swan -> King Redhead -> Rip Indra -> TravelZou
-		if not KX.questsDone.donSwan then
+		-- Phase 1: Trevor >=1M Fruit Access ("FlamingoAccess")
+		if not KX.questsDone.donSwan and (os.clock() - lastTrevorPoll >= 3.0) then
+			lastTrevorPoll = os.clock()
 			pcall(function()
 				local u = CommF_:InvokeServer("GetUnlockables")
 				if type(u) == "table" and u.FlamingoAccess then
@@ -2363,103 +2727,197 @@ do
 		end
 
 		if not KX.questsDone.donSwan then
-			-- Unstore a spare >=1M fruit if available in inventory for Trevor
-			local trevorPos = Vector3.new(-336.5, 331.8, 639.0)
-			local spareList = {"Quake-Quake", "Love-Love", "Spider-Spider", "Sound-Sound", "Phoenix-Phoenix", "Pain-Pain", "Shadow-Shadow", "Gravity-Gravity", "Blizzard-Blizzard"}
 			local held1M = nil
-			for _, fk in ipairs(spareList) do
-				local base = fk:match("^(.-)%-") or fk
-				local t = KX.hasToolAnywhere(base .. " Fruit")
-				if t then held1M = t; break end
+			for _, fk in ipairs(TREVOR_SPARE_FRUITS) do
+				if not (KX.autoEatAllowedFruits and KX.allowedEatFruits[fk]) then
+					local base = fk:match("^(.-)%-") or fk
+					local t = KX.hasToolAnywhere(base .. " Fruit")
+					if t then
+						held1M = t
+						break
+					end
+				end
 			end
-			if not held1M then
-				for _, fk in ipairs(spareList) do
-					local okL = pcall(function() return CommF_:InvokeServer("LoadFruit", fk) end)
-					if okL then
+
+			if not held1M and (os.clock() - lastTrevorLoadAttempt >= 8.0) then
+				lastTrevorLoadAttempt = os.clock()
+				for _, fk in ipairs(TREVOR_SPARE_FRUITS) do
+					if not (KX.autoEatAllowedFruits and KX.allowedEatFruits[fk]) then
+						pcall(function() CommF_:InvokeServer("LoadFruit", fk) end)
 						local base = fk:match("^(.-)%-") or fk
 						held1M = KX.hasToolAnywhere(base .. " Fruit")
 						if held1M then break end
 					end
 				end
 			end
+
 			if held1M then
 				KX.protectedTool = held1M
+				local trevorPos = KX.getNPCWorldPos("Trevor", Vector3.new(-336.5, 331.8, 639.0))
 				setStatus("🦩 Entregando fruta >=1M a Trevor para abrir Don Swan...", KX.phaseText)
-				if KX.moveToCFrame(CFrame.new(trevorPos)) then
+				if KX.moveToCFrame(CFrame.new(trevorPos)) or (hrp.Position - trevorPos).Magnitude <= 25 then
 					KX.equipExactTool(held1M)
 					pcall(function()
 						CommF_:InvokeServer("TalkTrevor", "1")
 						CommF_:InvokeServer("TalkTrevor", "2")
 						CommF_:InvokeServer("TalkTrevor", "3")
+						local u = CommF_:InvokeServer("GetUnlockables")
+						if type(u) == "table" and u.FlamingoAccess then
+							KX.questsDone.donSwan = true
+						end
 					end)
-					KX.protectedTool = nil
-					KX.questsDone.donSwan = true
+					if KX.questsDone.donSwan then
+						KX.protectedTool = nil
+						lastZProgPoll = 0
+					end
 				end
 				return
 			end
-		end
 
-		-- Check ZQuestProgress (Don Swan + Sea 2 Rip Indra)
-		local zProg = nil
-		pcall(function() zProg = CommF_:InvokeServer("ZQuestProgress", "Check") end)
-		if tonumber(zProg) == 1 then
-			KX.questsDone.ripIndraSea2 = true
-			setStatus("🚢 ¡Sea 3 desbloqueado! Viajando al Tercer Sea...", KX.phaseText)
-			pcall(function() CommF_:InvokeServer("TravelZou") end)
-			return
-		end
-
-		-- Defeat Don Swan if alive/needed, then talk to King Redhead at Coliseum to fight Rip Indra!
-		local swan, swanInEn = KX.findBossOrEnemy({"Swan"}, true)
-		if swan and swanInEn and tonumber(zProg) == nil then
-			KX.engageTarget(swan, nil, "🦩 Derrotando a Don Swan", "Melee")
-			return
-		end
-
-		local redheadPos = Vector3.new(-1927.5, 13.5, 1738.0)
-		setStatus("👑 Iniciando evento Rip Indra (Sea 2) con King Redhead...", KX.phaseText)
-		if KX.moveToCFrame(CFrame.new(redheadPos)) then
-			pcall(function()
-				CommF_:InvokeServer("ZQuestProgress", "Begin")
-			end)
-			task.wait(0.8)
-			local s2Indra, s2In = KX.findBossOrEnemy({"rip_indra"}, true)
-			if s2Indra and s2In then
-				KX.engageTarget(s2Indra, nil, "👑 Derrotando a Rip Indra (Sea 2 -> Sea 3)", "Melee")
+			-- No >=1M fruit available yet -> Decisively farm highest Sea 2 quest + Gacha + map fruits (NEVER walk into locked room!)
+			if KX.tryGrabGroundFruit(hrp) then
 				return
 			end
-			pcall(function() CommF_:InvokeServer("TravelZou") end)
+			KX.phaseText = "Tier 2: Farm Sea 2 (Esperando Fruta >=1M Trevor)"
+			KX.stepStandardSeaLevelFarm(hrp, "🦩 Farm Nivel/Beli [Buscando fruta >=1M para Trevor]")
+			return
 		end
+
+		KX.protectedTool = nil
+
+		-- Phase 2: Poll ZQuestProgress ("Check" -> nil: Don Swan | 0: King Red Head & rip_indra | 1: TravelZou)
+		if os.clock() - lastZProgPoll >= 2.0 then
+			lastZProgPoll = os.clock()
+			pcall(function()
+				cachedZProg = CommF_:InvokeServer("ZQuestProgress", "Check")
+			end)
+		end
+
+		local swanRoomCenter = Vector3.new(2288.8, 15.2, 905.5)
+		local playerInSwanRoom = KX.isPosInSwanRoom(hrp.Position)
+
+		-- 2A) cachedZProg == nil -> Enter Don Swan's room & defeat exact boss "Don Swan"!
+		if cachedZProg == nil then
+			if not playerInSwanRoom then
+				setStatus("🦩 Sea 2->3: Entrando a la sala de Don Swan...", KX.phaseText)
+				KX.moveToCFrame(CFrame.new(swanRoomCenter))
+				return
+			end
+
+			local swanBoss, swanInEn = KX.findExactBoss({"Don Swan"}, true)
+			if swanBoss and swanInEn then
+				swanWasAlive = true
+				swanEmptySince = 0
+				KX.engageTarget(swanBoss, nil, "🦩 Derrotando a Don Swan [Paso a Sea 3]", "Melee")
+				return
+			elseif swanWasAlive then
+				swanWasAlive = false
+				lastZProgPoll = 0
+				return
+			end
+
+			setStatus("🦩 Sea 2->3: Buscando a Don Swan en la sala...", KX.phaseText)
+			local reachedRoom = KX.moveToCFrame(CFrame.new(swanRoomCenter))
+			if reachedRoom or (hrp.Position - swanRoomCenter).Magnitude <= 45 then
+				if not swanBoss then
+					if swanEmptySince == 0 then
+						swanEmptySince = os.clock()
+					elseif (os.clock() - swanEmptySince >= 6.5) and (os.clock() - KX.spawnedAtClock >= 10.0) then
+						swanEmptySince = 0
+						local freshZ = nil
+						pcall(function() freshZ = CommF_:InvokeServer("ZQuestProgress", "Check") end)
+						if freshZ == 0 or freshZ == 1 then
+							cachedZProg = freshZ
+						else
+							KX.serverHop("Don Swan no activo (Paso a Sea 3)")
+						end
+					end
+				else
+					swanEmptySince = 0
+				end
+			end
+			return
+		end
+
+		-- Exit Don Swan's room cleanly before moving to Colosseum / Mr. Captain
+		if playerInSwanRoom then
+			setStatus("🦩 Saliendo de la sala de Don Swan...", KX.phaseText)
+			KX.moveToCFrame(CFrame.new(-287.5, 305.2, 586.0))
+			return
+		end
+
+		-- 2B) cachedZProg == 0 -> Speak to King Red Head ("Begin") & Defeat rip_indra in Sealed Colosseum!
+		if tonumber(cachedZProg) == 0 then
+			local inSealedIndraArena = (hrp.Position.X < -15000)
+			if inSealedIndraArena then
+				local s2Indra, s2In = KX.findExactBoss({"rip_indra"}, true)
+				if s2Indra and s2In then
+					s2IndraWasAlive = true
+					KX.engageTarget(s2Indra, nil, "👑 Derrotando a rip_indra [Paso a Sea 3]", "Melee")
+					return
+				elseif s2IndraWasAlive then
+					s2IndraWasAlive = false
+					lastZProgPoll = 0
+					return
+				end
+				setStatus("👑 Esperando aparición / cinemática de rip_indra...", KX.phaseText)
+				return
+			end
+
+			local krhPos = KX.getNPCWorldPos("King Red Head", Vector3.new(-1929.0, 12.8, 1738.0))
+			setStatus("👑 Sea 2->3: Hablando con King Red Head para combatir a rip_indra...", KX.phaseText)
+			local reachedKrh = KX.moveToCFrame(CFrame.new(krhPos + Vector3.new(0, 3, 3)))
+			if (reachedKrh or (hrp.Position - krhPos).Magnitude <= 28) and (os.clock() - lastZBeginInvoke >= 3.5) then
+				lastZBeginInvoke = os.clock()
+				pcall(function()
+					CommF_:InvokeServer("ZQuestProgress", "Check")
+					CommF_:InvokeServer("ZQuestProgress", "Begin")
+				end)
+				lastZProgPoll = 0
+			end
+			return
+		end
+
+		-- 2C) cachedZProg == 1 -> rip_indra defeated! Travel directly to Sea 3!
+		KX.questsDone.ripIndraSea2 = true
+		local capPos = KX.getNPCWorldPos("Mr. Captain", Vector3.new(-1907.0, 5.2, -2533.0))
+		setStatus("🚢 ¡Sea 3 desbloqueado! Viajando al Tercer Sea con Mr. Captain...", KX.phaseText)
+		if os.clock() - lastZTravelInvoke >= 2.5 then
+			lastZTravelInvoke = os.clock()
+			pcall(function()
+				CommF_:InvokeServer("ZQuestProgress", "Zou")
+				CommF_:InvokeServer("TravelZou")
+			end)
+		end
+		KX.moveToCFrame(CFrame.new(capPos + Vector3.new(0, 3, 3)))
 	end
 
 	function KX.stepLevelingTier2(hrp)
-		KX.stepPassiveMeleeRotation()
-
-		-- Sea 1 Saber milestone at Lv >= 200
+		-- 1) Sea 1 Saber milestone at Lv >= 200
 		if KX.level >= 200 and not KX.ownedSwords["Saber"] and KX.worldNum == 1 then
 			KX.stepSea1SaberQuest(hrp)
 			return
 		end
 
-		-- Sea 1 -> Sea 2 transition at Lv >= 700
+		-- 2) Sea 1 -> Sea 2 transition at Lv >= 700
 		if KX.level >= 700 and KX.worldNum == 1 then
 			KX.stepSea1ToSea2Quest(hrp)
 			return
 		end
 
-		-- Sea 2 Bartilo milestone at Lv >= 850
+		-- 3) Sea 2 Bartilo milestone at Lv >= 850
 		if KX.level >= 850 and KX.worldNum == 2 and not KX.questsDone.bartilo then
 			KX.stepBartiloQuest(hrp)
 			return
 		end
 
-		-- Sea 2 -> Sea 3 transition at Lv >= 1500
+		-- 4) Sea 2 -> Sea 3 transition at Lv >= 1500
 		if KX.level >= 1500 and KX.worldNum == 2 then
 			KX.stepSea2ToSea3Quest(hrp)
 			return
 		end
 
-		-- Ensure player is in highest unlocked Sea for optimal EXP
+		-- 5) Ensure player is in highest unlocked Sea for optimal EXP
 		if KX.level >= 1500 and KX.worldNum < 3 then
 			KX.travelToSea(3)
 			return
@@ -2468,21 +2926,14 @@ do
 			return
 		end
 
-		KX.phaseText = string.format("Tier 2: Farm Level (%d / %d)", KX.level, KX.maxLevel)
-		local qInfo = KX.getBestLevelQuest()
-		if qInfo then
-			if KX.ensureQuestAccepted(qInfo, hrp) then
-				KX.farmMobSpawns(qInfo.mobName, qInfo.spawns, "⚔️ Farm Level [" .. tostring(KX.level) .. "]", "Melee")
-			end
-		else
-			-- Fallback high-EXP grind in Cake Land (Sea 3)
-			local mob = KX.findNearestAliveFromSet(CAKE_LAND_MOBS)
-			if mob then
-				KX.engageTarget(mob, CAKE_LAND_MOBS, "⚔️ Farm Level (Cake Land)", "Melee")
-			else
-				KX.moveToCFrame(CFrame.new(-2095.0, 70.0, -12140.0))
-			end
+		-- 6) Exclusive Map Fruit Pickup (returns true when moving so zero concurrent tasks run!)
+		if KX.tryGrabGroundFruit(hrp) then
+			return
 		end
+
+		-- 7) Standard Sea Quest Leveling + Passive Melee Rotation
+		KX.phaseText = string.format("Tier 2: Farm Level (%d / %d)", KX.level, KX.maxLevel)
+		KX.stepStandardSeaLevelFarm(hrp)
 	end
 
 	-- =========================================================================
@@ -3304,24 +3755,26 @@ do
 end
 
 --------------------------------------------------------------------------------
--- 9. PIXEL-ACCURATE UI: "Switch Hub [ Series X ] | General ⚙️"
+-- 9. UPGRADED SERIES X UI: EMOJIS + REAL-TIME MELEE & EXP TRACKER
 --------------------------------------------------------------------------------
 do
 	local THEME = {
 		BgOuter       = Color3.fromRGB(10, 4, 15),
-		BgInner       = Color3.fromRGB(12, 5, 18),
-		BgBox         = Color3.fromRGB(14, 6, 22),
-		BorderOuter   = Color3.fromRGB(112, 34, 158),
-		BorderInner   = Color3.fromRGB(82, 24, 118),
-		BorderBox     = Color3.fromRGB(92, 28, 134),
-		VeinLine      = Color3.fromRGB(24, 9, 36),
-		AccentPurple  = Color3.fromRGB(162, 82, 232),
-		AccentBright  = Color3.fromRGB(190, 120, 255),
-		TextPrimary   = Color3.fromRGB(226, 220, 235),
-		TextSecondary = Color3.fromRGB(168, 156, 186),
-		CheckBg       = Color3.fromRGB(34, 14, 52),
-		GreenOk       = Color3.fromRGB(86, 214, 108),
-		RedMissing    = Color3.fromRGB(224, 68, 78),
+		BgInner       = Color3.fromRGB(13, 5, 20),
+		BgBox         = Color3.fromRGB(16, 7, 25),
+		BgCard        = Color3.fromRGB(24, 10, 38),
+		BorderOuter   = Color3.fromRGB(126, 42, 180),
+		BorderInner   = Color3.fromRGB(86, 26, 124),
+		BorderBox     = Color3.fromRGB(98, 32, 144),
+		VeinLine      = Color3.fromRGB(26, 10, 40),
+		AccentPurple  = Color3.fromRGB(168, 86, 240),
+		AccentBright  = Color3.fromRGB(206, 140, 255),
+		TextPrimary   = Color3.fromRGB(232, 226, 242),
+		TextSecondary = Color3.fromRGB(172, 158, 192),
+		CheckBg       = Color3.fromRGB(36, 15, 56),
+		GreenOk       = Color3.fromRGB(86, 220, 112),
+		RedMissing    = Color3.fromRGB(228, 70, 82),
+		ExpTrack      = Color3.fromRGB(38, 16, 58),
 	}
 
 	local ScreenGui = Instance.new("ScreenGui")
@@ -3333,7 +3786,7 @@ do
 
 	local MainWin = Instance.new("Frame")
 	MainWin.Name = "MainWindow"
-	MainWin.Size = UDim2.new(0, 590, 0, 640)
+	MainWin.Size = UDim2.new(0, 650, 0, 665)
 	MainWin.AnchorPoint = Vector2.new(0.5, 0.5)
 	MainWin.Position = UDim2.new(0.5, 0, 0.5, 0)
 	MainWin.BackgroundColor3 = THEME.BgOuter
@@ -3341,13 +3794,17 @@ do
 	MainWin.ClipsDescendants = true
 	MainWin.Parent = ScreenGui
 
+	local mainCorner = Instance.new("UICorner")
+	mainCorner.CornerRadius = UDim.new(0, 5)
+	mainCorner.Parent = MainWin
+
 	-- Auto-scale cleanly on smaller 720p/768p screens so the entire panel stays crisp and visible
 	local uiScale = Instance.new("UIScale")
 	uiScale.Parent = MainWin
 	local function updateWindowScale()
 		local cam = Workspace.CurrentCamera
 		local vp = cam and cam.ViewportSize or Vector2.new(1366, 768)
-		local targetScale = math.clamp(math.min((vp.Y - 40) / 650, (vp.X - 40) / 600), 0.72, 1.0)
+		local targetScale = math.clamp(math.min((vp.Y - 36) / 675, (vp.X - 36) / 660), 0.70, 1.0)
 		uiScale.Scale = targetScale
 	end
 	updateWindowScale()
@@ -3357,7 +3814,7 @@ do
 
 	local outerStroke = Instance.new("UIStroke")
 	outerStroke.Color = THEME.BorderOuter
-	outerStroke.Thickness = 1.4
+	outerStroke.Thickness = 1.5
 	outerStroke.Parent = MainWin
 
 	-- Subtle dark purple organic diagonal veins in background matching the Series X theme
@@ -3372,7 +3829,7 @@ do
 		vLine.Position = UDim2.new(i * 0.13, 0, -0.15, 0)
 		vLine.Rotation = (i % 2 == 0) and 22 or -19
 		vLine.BackgroundColor3 = THEME.VeinLine
-		vLine.BackgroundTransparency = 0.45
+		vLine.BackgroundTransparency = 0.42
 		vLine.BorderSizePixel = 0
 		vLine.ZIndex = 1
 		vLine.Parent = bgDecor
@@ -3383,10 +3840,14 @@ do
 	InnerFrame.Size = UDim2.new(1, -12, 1, -12)
 	InnerFrame.Position = UDim2.new(0, 6, 0, 6)
 	InnerFrame.BackgroundColor3 = THEME.BgInner
-	InnerFrame.BackgroundTransparency = 0.25
+	InnerFrame.BackgroundTransparency = 0.22
 	InnerFrame.BorderSizePixel = 0
 	InnerFrame.ZIndex = 2
 	InnerFrame.Parent = MainWin
+
+	local innerCorner = Instance.new("UICorner")
+	innerCorner.CornerRadius = UDim.new(0, 4)
+	innerCorner.Parent = InnerFrame
 
 	local innerStroke = Instance.new("UIStroke")
 	innerStroke.Color = THEME.BorderInner
@@ -3394,37 +3855,50 @@ do
 	innerStroke.Parent = InnerFrame
 
 	-- =========================================================================
-	-- TOP HEADER BAR: Switch Hub [ Series X ] | General ⚙️
+	-- TOP HEADER BAR: ⚡ Switch Hub [ Series X ] | 📊 General ⚙️  [🟢 ACTIVE] —
 	-- =========================================================================
 	local HeaderBar = Instance.new("Frame")
 	HeaderBar.Name = "HeaderBar"
-	HeaderBar.Size = UDim2.new(1, -12, 0, 32)
+	HeaderBar.Size = UDim2.new(1, -12, 0, 34)
 	HeaderBar.Position = UDim2.new(0, 6, 0, 6)
 	HeaderBar.BackgroundColor3 = THEME.BgOuter
 	HeaderBar.BorderSizePixel = 0
 	HeaderBar.ZIndex = 4
 	HeaderBar.Parent = InnerFrame
 
+	local headerCorner = Instance.new("UICorner")
+	headerCorner.CornerRadius = UDim.new(0, 4)
+	headerCorner.Parent = HeaderBar
+
 	local headerStroke = Instance.new("UIStroke")
 	headerStroke.Color = THEME.BorderBox
 	headerStroke.Thickness = 1
 	headerStroke.Parent = HeaderBar
 
+	local HeaderAccentLine = Instance.new("Frame")
+	HeaderAccentLine.Size = UDim2.new(1, 0, 0, 1)
+	HeaderAccentLine.Position = UDim2.new(0, 0, 1, -1)
+	HeaderAccentLine.BackgroundColor3 = THEME.AccentPurple
+	HeaderAccentLine.BackgroundTransparency = 0.45
+	HeaderAccentLine.BorderSizePixel = 0
+	HeaderAccentLine.ZIndex = 5
+	HeaderAccentLine.Parent = HeaderBar
+
 	local BrandLabel = Instance.new("TextLabel")
-	BrandLabel.Size = UDim2.new(0, 202, 1, 0)
+	BrandLabel.Size = UDim2.new(0, 224, 1, 0)
 	BrandLabel.Position = UDim2.new(0, 10, 0, 0)
 	BrandLabel.BackgroundTransparency = 1
 	BrandLabel.Font = Enum.Font.RobotoMono
 	BrandLabel.TextSize = 14
-	BrandLabel.TextColor3 = THEME.AccentPurple
+	BrandLabel.TextColor3 = THEME.AccentBright
 	BrandLabel.TextXAlignment = Enum.TextXAlignment.Left
-	BrandLabel.Text = "Switch Hub [ Series X ]"
+	BrandLabel.Text = "⚡ Switch Hub [ Series X ]"
 	BrandLabel.ZIndex = 5
 	BrandLabel.Parent = HeaderBar
 
 	local PipeLabel = Instance.new("TextLabel")
 	PipeLabel.Size = UDim2.new(0, 14, 1, 0)
-	PipeLabel.Position = UDim2.new(0, 212, 0, 0)
+	PipeLabel.Position = UDim2.new(0, 234, 0, 0)
 	PipeLabel.BackgroundTransparency = 1
 	PipeLabel.Font = Enum.Font.RobotoMono
 	PipeLabel.TextSize = 14
@@ -3434,13 +3908,13 @@ do
 	PipeLabel.Parent = HeaderBar
 
 	local GeneralTabBtn = Instance.new("TextButton")
-	GeneralTabBtn.Size = UDim2.new(0, 64, 1, -4)
-	GeneralTabBtn.Position = UDim2.new(0, 228, 0, 2)
+	GeneralTabBtn.Size = UDim2.new(0, 88, 1, -4)
+	GeneralTabBtn.Position = UDim2.new(0, 250, 0, 2)
 	GeneralTabBtn.BackgroundTransparency = 1
 	GeneralTabBtn.Font = Enum.Font.RobotoMono
-	GeneralTabBtn.TextSize = 14
+	GeneralTabBtn.TextSize = 13
 	GeneralTabBtn.TextColor3 = THEME.TextPrimary
-	GeneralTabBtn.Text = "General"
+	GeneralTabBtn.Text = "📊 General"
 	GeneralTabBtn.ZIndex = 5
 	GeneralTabBtn.Parent = HeaderBar
 
@@ -3453,13 +3927,13 @@ do
 	GeneralUnderline.Parent = GeneralTabBtn
 
 	local GearTabBtn = Instance.new("TextButton")
-	GearTabBtn.Size = UDim2.new(0, 30, 1, -4)
-	GearTabBtn.Position = UDim2.new(0, 296, 0, 2)
+	GearTabBtn.Size = UDim2.new(0, 34, 1, -4)
+	GearTabBtn.Position = UDim2.new(0, 342, 0, 2)
 	GearTabBtn.BackgroundTransparency = 1
 	GearTabBtn.Font = Enum.Font.GothamBold
-	GearTabBtn.TextSize = 15
+	GearTabBtn.TextSize = 14
 	GearTabBtn.TextColor3 = THEME.TextSecondary
-	GearTabBtn.Text = "⚙"
+	GearTabBtn.Text = "⚙️"
 	GearTabBtn.ZIndex = 5
 	GearTabBtn.Parent = HeaderBar
 
@@ -3472,13 +3946,41 @@ do
 	GearUnderline.ZIndex = 6
 	GearUnderline.Parent = GearTabBtn
 
+	-- Live Running State Badge in Header
+	local StateBadge = Instance.new("Frame")
+	StateBadge.Size = UDim2.new(0, 96, 0, 20)
+	StateBadge.Position = UDim2.new(1, -134, 0.5, -10)
+	StateBadge.BackgroundColor3 = THEME.BgCard
+	StateBadge.BorderSizePixel = 0
+	StateBadge.ZIndex = 5
+	StateBadge.Parent = HeaderBar
+
+	local sbCorner = Instance.new("UICorner")
+	sbCorner.CornerRadius = UDim.new(0, 10)
+	sbCorner.Parent = StateBadge
+
+	local sbStroke = Instance.new("UIStroke")
+	sbStroke.Color = THEME.BorderOuter
+	sbStroke.Thickness = 1
+	sbStroke.Parent = StateBadge
+
+	local LblStateBadge = Instance.new("TextLabel")
+	LblStateBadge.Size = UDim2.new(1, 0, 1, 0)
+	LblStateBadge.BackgroundTransparency = 1
+	LblStateBadge.Font = Enum.Font.RobotoMono
+	LblStateBadge.TextSize = 11
+	LblStateBadge.TextColor3 = THEME.TextSecondary
+	LblStateBadge.Text = "🟣 STANDBY"
+	LblStateBadge.ZIndex = 6
+	LblStateBadge.Parent = StateBadge
+
 	local MinBtn = Instance.new("TextButton")
 	MinBtn.Size = UDim2.new(0, 28, 0, 24)
 	MinBtn.Position = UDim2.new(1, -32, 0.5, -12)
 	MinBtn.BackgroundTransparency = 1
 	MinBtn.Font = Enum.Font.RobotoMono
 	MinBtn.TextSize = 15
-	MinBtn.TextColor3 = THEME.AccentPurple
+	MinBtn.TextColor3 = THEME.AccentBright
 	MinBtn.Text = "—"
 	MinBtn.ZIndex = 5
 	MinBtn.Parent = HeaderBar
@@ -3514,20 +4016,24 @@ do
 	-- Floating Toggle Pill (Left Edge so Choose Team Pirates/Marines is never covered)
 	local FloatPill = Instance.new("TextButton")
 	FloatPill.Name = "SeriesX_FloatToggle"
-	FloatPill.Size = UDim2.new(0, 138, 0, 30)
-	FloatPill.Position = UDim2.new(0, 16, 0.5, -15)
+	FloatPill.Size = UDim2.new(0, 156, 0, 32)
+	FloatPill.Position = UDim2.new(0, 16, 0.5, -16)
 	FloatPill.BackgroundColor3 = THEME.BgOuter
 	FloatPill.BorderSizePixel = 0
 	FloatPill.Font = Enum.Font.RobotoMono
 	FloatPill.TextSize = 12
 	FloatPill.TextColor3 = THEME.AccentBright
-	FloatPill.Text = "[ Series X ] Open"
+	FloatPill.Text = "⚡ [ Series X ] Abrir"
 	FloatPill.Visible = false
 	FloatPill.Parent = ScreenGui
 
+	local pillCorner = Instance.new("UICorner")
+	pillCorner.CornerRadius = UDim.new(0, 6)
+	pillCorner.Parent = FloatPill
+
 	local pillStroke = Instance.new("UIStroke")
 	pillStroke.Color = THEME.BorderOuter
-	pillStroke.Thickness = 1.2
+	pillStroke.Thickness = 1.3
 	pillStroke.Parent = FloatPill
 
 	connect(MinBtn.MouseButton1Click, function()
@@ -3546,13 +4052,13 @@ do
 	end)
 
 	-- =========================================================================
-	-- PAGE CONTAINERS: GENERAL PAGE & SETTINGS (⚙) PAGE
+	-- PAGE CONTAINERS: GENERAL PAGE & SETTINGS (⚙️) PAGE
 	-- =========================================================================
 	local function makePageScroll(name, visible)
 		local sf = Instance.new("ScrollingFrame")
 		sf.Name = name
-		sf.Size = UDim2.new(1, -12, 1, -50)
-		sf.Position = UDim2.new(0, 6, 0, 44)
+		sf.Size = UDim2.new(1, -12, 1, -52)
+		sf.Position = UDim2.new(0, 6, 0, 46)
 		sf.BackgroundTransparency = 1
 		sf.BorderSizePixel = 0
 		sf.ScrollBarThickness = 3
@@ -3584,7 +4090,7 @@ do
 	local function createTwoColumns(page)
 		local leftCol = Instance.new("Frame")
 		leftCol.Name = "LeftCol"
-		leftCol.Size = UDim2.new(0.485, -4, 0, 0)
+		leftCol.Size = UDim2.new(0.50, -4, 0, 0)
 		leftCol.Position = UDim2.new(0, 2, 0, 2)
 		leftCol.AutomaticSize = Enum.AutomaticSize.Y
 		leftCol.BackgroundTransparency = 1
@@ -3598,8 +4104,8 @@ do
 
 		local rightCol = Instance.new("Frame")
 		rightCol.Name = "RightCol"
-		rightCol.Size = UDim2.new(0.515, -6, 0, 0)
-		rightCol.Position = UDim2.new(0.485, 4, 0, 2)
+		rightCol.Size = UDim2.new(0.50, -6, 0, 0)
+		rightCol.Position = UDim2.new(0.50, 4, 0, 2)
 		rightCol.AutomaticSize = Enum.AutomaticSize.Y
 		rightCol.BackgroundTransparency = 1
 		rightCol.ZIndex = 3
@@ -3621,7 +4127,7 @@ do
 		return leftCol, rightCol
 	end
 
-	-- Creates a Legend/Fieldset Box identical to the screenshot (purple title interrupting top border)
+	-- Creates a Legend/Fieldset Box with purple title interrupting top border
 	local function createFieldsetBox(parentCol, titleText, order)
 		local wrap = Instance.new("Frame")
 		wrap.Name = titleText .. "_Fieldset"
@@ -3638,10 +4144,14 @@ do
 		box.Position = UDim2.new(0, 0, 0, 7)
 		box.AutomaticSize = Enum.AutomaticSize.Y
 		box.BackgroundColor3 = THEME.BgBox
-		box.BackgroundTransparency = 0.25
+		box.BackgroundTransparency = 0.22
 		box.BorderSizePixel = 0
 		box.ZIndex = 3
 		box.Parent = wrap
+
+		local boxCorner = Instance.new("UICorner")
+		boxCorner.CornerRadius = UDim.new(0, 4)
+		boxCorner.Parent = box
 
 		local bStroke = Instance.new("UIStroke")
 		bStroke.Color = THEME.BorderBox
@@ -3649,7 +4159,7 @@ do
 		bStroke.Parent = box
 
 		local pad = Instance.new("UIPadding")
-		pad.PaddingTop = UDim.new(0, 11)
+		pad.PaddingTop = UDim.new(0, 12)
 		pad.PaddingBottom = UDim.new(0, 8)
 		pad.PaddingLeft = UDim.new(0, 10)
 		pad.PaddingRight = UDim.new(0, 8)
@@ -3664,12 +4174,12 @@ do
 		legend.Name = "Legend"
 		legend.AutomaticSize = Enum.AutomaticSize.X
 		legend.Size = UDim2.new(0, 0, 0, 15)
-		legend.Position = UDim2.new(0, 12, 0, 0)
+		legend.Position = UDim2.new(0, 10, 0, 0)
 		legend.BackgroundColor3 = THEME.BgOuter
 		legend.BorderSizePixel = 0
 		legend.Font = Enum.Font.RobotoMono
-		legend.TextSize = 13
-		legend.TextColor3 = THEME.AccentPurple
+		legend.TextSize = 12
+		legend.TextColor3 = THEME.AccentBright
 		legend.Text = " " .. titleText .. " "
 		legend.ZIndex = 5
 		legend.Parent = wrap
@@ -3694,7 +4204,7 @@ do
 		return lbl
 	end
 
-	-- Creates a "✅ : Saber" or "❌ : Bisento" live checklist row matching the screenshot
+	-- Creates a live checklist row supporting active highlight & real-time EXP/Mastery suffix
 	local function addChecklistItemRow(box, itemLabel, order)
 		local row = Instance.new("Frame")
 		row.Size = UDim2.new(1, 0, 0, 17)
@@ -3713,7 +4223,7 @@ do
 		badge.Parent = row
 
 		local bc = Instance.new("UICorner")
-		bc.CornerRadius = UDim.new(0, 2)
+		bc.CornerRadius = UDim.new(0, 3)
 		bc.Parent = badge
 
 		local icon = Instance.new("TextLabel")
@@ -3731,31 +4241,33 @@ do
 		txt.Position = UDim2.new(0, 17, 0, 0)
 		txt.BackgroundTransparency = 1
 		txt.Font = Enum.Font.RobotoMono
-		txt.TextSize = 12
+		txt.TextSize = 11
+		txt.TextTruncate = Enum.TextTruncate.AtEnd
 		txt.TextColor3 = THEME.TextPrimary
 		txt.TextXAlignment = Enum.TextXAlignment.Left
 		txt.Text = ": " .. itemLabel
 		txt.ZIndex = 4
 		txt.Parent = row
 
-		local function setOwned(owned, extraSuffix)
+		local function setOwned(owned, extraSuffix, isActiveHighlight)
 			if owned then
 				badge.BackgroundTransparency = 0.05
-				badge.BackgroundColor3 = THEME.GreenOk
+				badge.BackgroundColor3 = isActiveHighlight and THEME.AccentBright or THEME.GreenOk
 				icon.Text = "✓"
-				icon.TextColor3 = Color3.fromRGB(16, 28, 18)
+				icon.TextColor3 = Color3.fromRGB(16, 20, 24)
 			else
 				badge.BackgroundTransparency = 1
 				icon.Text = "✕"
 				icon.TextColor3 = THEME.RedMissing
 			end
+			txt.TextColor3 = isActiveHighlight and THEME.AccentBright or (owned and THEME.TextPrimary or THEME.TextSecondary)
 			txt.Text = ": " .. itemLabel .. (extraSuffix or "")
 		end
 		setOwned(false)
 		return setOwned
 	end
 
-	-- Creates a purple square checkbox "[■] Auto Farm" matching the screenshot
+	-- Creates a purple square checkbox "[■] Auto Farm"
 	local function addPurpleCheckbox(box, labelText, initialValue, order, onChanged)
 		local btn = Instance.new("TextButton")
 		btn.Size = UDim2.new(1, 0, 0, 20)
@@ -3772,6 +4284,10 @@ do
 		sq.BorderSizePixel = 0
 		sq.ZIndex = 4
 		sq.Parent = btn
+
+		local sqCorner = Instance.new("UICorner")
+		sqCorner.CornerRadius = UDim.new(0, 2)
+		sqCorner.Parent = sq
 
 		local sqStroke = Instance.new("UIStroke")
 		sqStroke.Color = THEME.BorderOuter
@@ -3816,104 +4332,184 @@ do
 	end
 
 	-- =========================================================================
-	-- BUILD GENERAL PAGE (EXACT TWO-COLUMN KAITUN SERIES X LAYOUT)
+	-- BUILD GENERAL PAGE (UPGRADED TWO-COLUMN KAITUN SERIES X LAYOUT)
 	-- =========================================================================
 	local GenLeft, GenRight = createTwoColumns(GeneralPage)
 
-	-- LEFT 1: Time
-	local BoxTime = createFieldsetBox(GenLeft, "Time", 1)
-	local LblTime = addInfoTextRow(BoxTime, "0 Hr(s), 0 Min(s), 0 Sec(s)", 1)
+	-- LEFT 1: ⏱️ Time
+	local BoxTime = createFieldsetBox(GenLeft, "⏱️ Time", 1)
+	local LblTime = addInfoTextRow(BoxTime, "⏳ 0 Hr(s), 0 Min(s), 0 Sec(s)", 1)
 
-	-- LEFT 2: Status
-	local BoxStatus = createFieldsetBox(GenLeft, "Status", 2)
-	local LblName = addInfoTextRow(BoxStatus, "Name : " .. tostring(LocalPlayer.Name), 1)
-	local LblWorld = addInfoTextRow(BoxStatus, "World : 1", 2)
-	local LblFruit = addInfoTextRow(BoxStatus, "Fruit : ", 3)
-	local LblAwaken = addInfoTextRow(BoxStatus, "Awaken : ", 4)
-	local LblExp2x = addInfoTextRow(BoxStatus, "2x EXP : Inactive", 5)
+	-- LEFT 2: 👤 Status
+	local BoxStatus = createFieldsetBox(GenLeft, "👤 Status", 2)
+	local LblName = addInfoTextRow(BoxStatus, "🪪 Name : " .. tostring(LocalPlayer.Name), 1)
+	local LblWorld = addInfoTextRow(BoxStatus, "🌍 World : Sea 1 • ⭐ Lv. 1", 2)
+	local LblFruit = addInfoTextRow(BoxStatus, "🍎 Fruit : None", 3)
+	local LblAwaken = addInfoTextRow(BoxStatus, "✨ Awaken : -", 4)
+	local LblExp2x = addInfoTextRow(BoxStatus, "🚀 2x EXP : Inactive", 5)
 
-	-- LEFT 3: Quest
-	local BoxQuest = createFieldsetBox(GenLeft, "Quest", 3)
+	-- LEFT 3: 📜 Quest
+	local BoxQuest = createFieldsetBox(GenLeft, "📜 Quest", 3)
 	local QuestRows = {
-		saber          = addChecklistItemRow(BoxQuest, "Quest Saber", 1),
-		dressrosa      = addChecklistItemRow(BoxQuest, "Quest Dressrosa", 2),
-		bartilo        = addChecklistItemRow(BoxQuest, "Quest Bartilo", 3),
-		donSwan        = addChecklistItemRow(BoxQuest, "Quest Don Swan", 4),
-		ripIndraSea2   = addChecklistItemRow(BoxQuest, "Quest Rip Indra", 5),
-		deathStep      = addChecklistItemRow(BoxQuest, "Quest Death Step", 6),
-		sharkmanKarate = addChecklistItemRow(BoxQuest, "Quest Sharkman Karate", 7),
-		electricClaw   = addChecklistItemRow(BoxQuest, "Quest Electric Claw", 8),
-		dragonTalon    = addChecklistItemRow(BoxQuest, "Quest Dragon Talon", 9),
-		mirrorFractal  = addChecklistItemRow(BoxQuest, "Mirror Fractal", 10),
-		blueGear       = addChecklistItemRow(BoxQuest, "Mirage & Blue Gear", 11),
+		saber          = addChecklistItemRow(BoxQuest, "🗡️ Quest Saber", 1),
+		dressrosa      = addChecklistItemRow(BoxQuest, "❄️ Quest Dressrosa", 2),
+		bartilo        = addChecklistItemRow(BoxQuest, "🔨 Quest Bartilo", 3),
+		donSwan        = addChecklistItemRow(BoxQuest, "🦩 Quest Don Swan", 4),
+		ripIndraSea2   = addChecklistItemRow(BoxQuest, "👑 Quest Rip Indra", 5),
+		deathStep      = addChecklistItemRow(BoxQuest, "🔥 Quest Death Step", 6),
+		sharkmanKarate = addChecklistItemRow(BoxQuest, "🦈 Quest Sharkman Karate", 7),
+		electricClaw   = addChecklistItemRow(BoxQuest, "🌩️ Quest Electric Claw", 8),
+		dragonTalon    = addChecklistItemRow(BoxQuest, "🐲 Quest Dragon Talon", 9),
+		mirrorFractal  = addChecklistItemRow(BoxQuest, "🪞 Mirror Fractal", 10),
+		blueGear       = addChecklistItemRow(BoxQuest, "⚙️ Mirage & Blue Gear", 11),
 	}
 
-	-- LEFT 4: Melee
-	local BoxMelee = createFieldsetBox(GenLeft, "Melee", 4)
+	-- LEFT 4: 🥊 Melee (REAL-TIME ACTIVE MELEE + LIVE EXP BAR + ALL STYLES)
+	local BoxMelee = createFieldsetBox(GenLeft, "🥊 Melee (Real-Time)", 4)
+
+	local ActiveMeleeCard = Instance.new("Frame")
+	ActiveMeleeCard.Name = "ActiveMeleeCard"
+	ActiveMeleeCard.Size = UDim2.new(1, 0, 0, 52)
+	ActiveMeleeCard.BackgroundColor3 = THEME.BgCard
+	ActiveMeleeCard.BackgroundTransparency = 0.12
+	ActiveMeleeCard.BorderSizePixel = 0
+	ActiveMeleeCard.LayoutOrder = 0
+	ActiveMeleeCard.ZIndex = 4
+	ActiveMeleeCard.Parent = BoxMelee
+
+	local amCorner = Instance.new("UICorner")
+	amCorner.CornerRadius = UDim.new(0, 4)
+	amCorner.Parent = ActiveMeleeCard
+
+	local amStroke = Instance.new("UIStroke")
+	amStroke.Color = THEME.AccentPurple
+	amStroke.Thickness = 1
+	amStroke.Transparency = 0.25
+	amStroke.Parent = ActiveMeleeCard
+
+	local LblActiveMeleeTitle = Instance.new("TextLabel")
+	LblActiveMeleeTitle.Size = UDim2.new(1, -12, 0, 16)
+	LblActiveMeleeTitle.Position = UDim2.new(0, 6, 0, 4)
+	LblActiveMeleeTitle.BackgroundTransparency = 1
+	LblActiveMeleeTitle.Font = Enum.Font.RobotoMono
+	LblActiveMeleeTitle.TextSize = 12
+	LblActiveMeleeTitle.TextColor3 = THEME.AccentBright
+	LblActiveMeleeTitle.TextXAlignment = Enum.TextXAlignment.Left
+	LblActiveMeleeTitle.TextTruncate = Enum.TextTruncate.AtEnd
+	LblActiveMeleeTitle.Text = "⚡ Actual: Detectando..."
+	LblActiveMeleeTitle.ZIndex = 5
+	LblActiveMeleeTitle.Parent = ActiveMeleeCard
+
+	local LblActiveMeleeExp = Instance.new("TextLabel")
+	LblActiveMeleeExp.Size = UDim2.new(1, -12, 0, 15)
+	LblActiveMeleeExp.Position = UDim2.new(0, 6, 0, 21)
+	LblActiveMeleeExp.BackgroundTransparency = 1
+	LblActiveMeleeExp.Font = Enum.Font.RobotoMono
+	LblActiveMeleeExp.TextSize = 11
+	LblActiveMeleeExp.TextColor3 = THEME.TextPrimary
+	LblActiveMeleeExp.TextXAlignment = Enum.TextXAlignment.Left
+	LblActiveMeleeExp.TextTruncate = Enum.TextTruncate.AtEnd
+	LblActiveMeleeExp.Text = "✨ EXP: 0 / 0 (0.0%)"
+	LblActiveMeleeExp.ZIndex = 5
+	LblActiveMeleeExp.Parent = ActiveMeleeCard
+
+	local ExpBarTrack = Instance.new("Frame")
+	ExpBarTrack.Size = UDim2.new(1, -12, 0, 6)
+	ExpBarTrack.Position = UDim2.new(0, 6, 0, 40)
+	ExpBarTrack.BackgroundColor3 = THEME.ExpTrack
+	ExpBarTrack.BorderSizePixel = 0
+	ExpBarTrack.ZIndex = 5
+	ExpBarTrack.Parent = ActiveMeleeCard
+
+	local ebTrackCorner = Instance.new("UICorner")
+	ebTrackCorner.CornerRadius = UDim.new(1, 0)
+	ebTrackCorner.Parent = ExpBarTrack
+
+	local ExpBarFill = Instance.new("Frame")
+	ExpBarFill.Size = UDim2.new(0, 0, 1, 0)
+	ExpBarFill.BackgroundColor3 = THEME.AccentPurple
+	ExpBarFill.BorderSizePixel = 0
+	ExpBarFill.ZIndex = 6
+	ExpBarFill.Parent = ExpBarTrack
+
+	local ebFillCorner = Instance.new("UICorner")
+	ebFillCorner.CornerRadius = UDim.new(1, 0)
+	ebFillCorner.Parent = ExpBarFill
+
+	local ebGrad = Instance.new("UIGradient")
+	ebGrad.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, THEME.AccentPurple),
+		ColorSequenceKeypoint.new(1, THEME.AccentBright),
+	})
+	ebGrad.Parent = ExpBarFill
+
 	local MeleeRows = {}
-	for i, mName in ipairs(MELEE_LIST) do
-		MeleeRows[mName] = addChecklistItemRow(BoxMelee, mName, i)
+	for i, entry in ipairs(MELEE_ENTRIES) do
+		MeleeRows[entry.ui] = addChecklistItemRow(BoxMelee, entry.icon .. " " .. entry.ui, i)
 	end
 
-	-- LEFT 5: Information
-	local BoxInfo = createFieldsetBox(GenLeft, "Information", 5)
-	local LblBone = addInfoTextRow(BoxInfo, "Bone : 0", 1)
-	local LblEcto = addInfoTextRow(BoxInfo, "Ectoplasm : 0", 2)
-	local LblElite = addInfoTextRow(BoxInfo, "Elite Hunter : 0", 3)
-	local LblDarkFrag = addInfoTextRow(BoxInfo, "Dark Fragment : 0", 4)
-	local LblCocoa = addInfoTextRow(BoxInfo, "Conjured Cocoa : 0", 5)
-	local LblAlucard = addInfoTextRow(BoxInfo, "Alucard Frag : 0/6", 6)
-	local LblValkyrie = addInfoTextRow(BoxInfo, "Valkyrie Helm : No", 7)
-	local LblCurrency = addInfoTextRow(BoxInfo, "Beli : 0 | Frag : 0", 8)
+	-- LEFT 5: 🎒 Information
+	local BoxInfo = createFieldsetBox(GenLeft, "🎒 Information", 5)
+	local LblBone = addInfoTextRow(BoxInfo, "🦴 Bone : 0", 1)
+	local LblEcto = addInfoTextRow(BoxInfo, "👻 Ectoplasm : 0", 2)
+	local LblElite = addInfoTextRow(BoxInfo, "🎯 Elite Hunter : 0/30", 3)
+	local LblDarkFrag = addInfoTextRow(BoxInfo, "🌑 Dark Fragment : 0", 4)
+	local LblCocoa = addInfoTextRow(BoxInfo, "🍫 Conjured Cocoa : 0", 5)
+	local LblAlucard = addInfoTextRow(BoxInfo, "🩸 Alucard Frag : 0/6", 6)
+	local LblValkyrie = addInfoTextRow(BoxInfo, "🪖 Valkyrie Helm : No", 7)
+	local LblCurrency = addInfoTextRow(BoxInfo, "💰 Beli : 0  |  💎 Frag : 0", 8)
 
-	-- RIGHT 1: Farming (THE 1-CLICK KAITUN BUTTON!)
-	local BoxFarming = createFieldsetBox(GenRight, "Farming", 1)
+	-- RIGHT 1: ⚔️ Farming (THE 1-CLICK KAITUN BUTTON!)
+	local BoxFarming = createFieldsetBox(GenRight, "⚔️ Farming", 1)
 	local setAutoFarmUI
-	setAutoFarmUI = addPurpleCheckbox(BoxFarming, "Auto Farm", KX.autoFarm, 1, function(enabled)
+	setAutoFarmUI = addPurpleCheckbox(BoxFarming, "⚡ Auto Farm (All-In-One Kaitun)", KX.autoFarm, 1, function(enabled)
 		KX.autoFarm = enabled
 		if not enabled then
 			KX.stopTween()
-			setStatus("Idle (Paused)", "Standby")
+			setStatus("⏸️ Idle (Paused)", "Standby")
 		else
-			setStatus("Starting Kaitun Series X...", "Initializing")
+			setStatus("🚀 Iniciando Kaitun Series X...", "Initializing")
 		end
 		saveConfig()
 	end)
-	local LblFarmStatus = addInfoTextRow(BoxFarming, "Status : " .. tostring(KX.statusText), 2)
-	local LblFarmPhase = addInfoTextRow(BoxFarming, "Phase : " .. tostring(KX.phaseText), 3)
+	local LblFarmStatus = addInfoTextRow(BoxFarming, "📡 Status : " .. tostring(KX.statusText), 2)
+	local LblFarmPhase = addInfoTextRow(BoxFarming, "🧭 Phase : " .. tostring(KX.phaseText), 3)
 	LblFarmPhase.TextColor3 = THEME.TextSecondary
 
-	-- RIGHT 2: Sword (All 18 Swords)
-	local BoxSword = createFieldsetBox(GenRight, "Sword", 2)
+	-- RIGHT 2: 🗡️ Sword (All 18 Swords + Live Mastery)
+	local BoxSword = createFieldsetBox(GenRight, "🗡️ Sword", 2)
 	local SwordRows = {}
 	for i, entry in ipairs(SWORD_LIST) do
-		SwordRows[entry.ui] = addChecklistItemRow(BoxSword, entry.ui, i)
+		SwordRows[entry.ui] = addChecklistItemRow(BoxSword, entry.icon .. " " .. entry.ui, i)
 	end
 
-	-- RIGHT 3: Gun (All 6 Guns)
-	local BoxGun = createFieldsetBox(GenRight, "Gun", 3)
+	-- RIGHT 3: 🔫 Gun (All 6 Guns + Live Mastery)
+	local BoxGun = createFieldsetBox(GenRight, "🔫 Gun", 3)
 	local GunRows = {}
 	for i, entry in ipairs(GUN_LIST) do
-		GunRows[entry.ui] = addChecklistItemRow(BoxGun, entry.ui, i)
+		GunRows[entry.ui] = addChecklistItemRow(BoxGun, entry.icon .. " " .. entry.ui, i)
 	end
 
 	-- =========================================================================
-	-- BUILD SETTINGS PAGE (⚙ ICON NEXT TO GENERAL)
+	-- BUILD SETTINGS PAGE (⚙️ ICON NEXT TO GENERAL)
 	-- =========================================================================
 	local SetLeft, SetRight = createTwoColumns(SettingsPage)
 
-	local BoxCoreCfg = createFieldsetBox(SetLeft, "Kaitun Engine", 1)
+	local BoxCoreCfg = createFieldsetBox(SetLeft, "⚙️ Kaitun Engine", 1)
 	local TeamBtn = Instance.new("TextButton")
-	TeamBtn.Size = UDim2.new(1, 0, 0, 22)
+	TeamBtn.Size = UDim2.new(1, 0, 0, 24)
 	TeamBtn.BackgroundColor3 = THEME.CheckBg
 	TeamBtn.BorderSizePixel = 0
 	TeamBtn.LayoutOrder = 1
 	TeamBtn.Font = Enum.Font.RobotoMono
 	TeamBtn.TextSize = 12
 	TeamBtn.TextColor3 = THEME.AccentBright
-	TeamBtn.Text = "Team : " .. tostring(KX.preferredTeam) .. " (Click)"
+	TeamBtn.Text = "🏴‍☠️ Team : " .. tostring(KX.preferredTeam) .. " (Click)"
 	TeamBtn.ZIndex = 4
 	TeamBtn.Parent = BoxCoreCfg
+	local tbCorner = Instance.new("UICorner")
+	tbCorner.CornerRadius = UDim.new(0, 4)
+	tbCorner.Parent = TeamBtn
 	local tbStroke = Instance.new("UIStroke")
 	tbStroke.Color = THEME.BorderBox
 	tbStroke.Thickness = 1
@@ -3921,7 +4517,8 @@ do
 
 	connect(TeamBtn.MouseButton1Click, function()
 		KX.preferredTeam = (KX.preferredTeam == "Pirates") and "Marines" or "Pirates"
-		TeamBtn.Text = "Team : " .. KX.preferredTeam .. " (Click)"
+		local tIcon = (KX.preferredTeam == "Pirates") and "🏴‍☠️" or "⚓"
+		TeamBtn.Text = tIcon .. " Team : " .. KX.preferredTeam .. " (Click)"
 		saveConfig()
 		if CommF_ then
 			task.spawn(function()
@@ -3930,57 +4527,58 @@ do
 		end
 	end)
 
-	addPurpleCheckbox(BoxCoreCfg, "Smart 2x EXP Codes", KX.smart2xExpCodes, 2, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🚀 Smart 2x EXP Codes", KX.smart2xExpCodes, 2, function(v)
 		KX.smart2xExpCodes = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "Auto Stats (Melee/Def/Sword)", KX.autoStats, 3, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "📊 Auto Stats (Melee/Def/Sword)", KX.autoStats, 3, function(v)
 		KX.autoStats = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "Auto Buso Haki", KX.autoBuso, 4, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🛡️ Auto Buso Haki", KX.autoBuso, 4, function(v)
 		KX.autoBuso = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "Auto Ken (Observation)", KX.autoKen, 5, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "👁️ Auto Ken (Observation)", KX.autoKen, 5, function(v)
 		KX.autoKen = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "Auto Race V3", KX.autoRaceV3, 6, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "⚡ Auto Race V3", KX.autoRaceV3, 6, function(v)
 		KX.autoRaceV3 = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "Smart Server Hop", KX.smartServerHop, 7, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🌐 Smart Server Hop", KX.smartServerHop, 7, function(v)
 		KX.smartServerHop = v; saveConfig()
 	end)
 
-	local BoxPerf = createFieldsetBox(SetLeft, "Performance & AFK", 2)
-	addPurpleCheckbox(BoxPerf, "FPS Boost (Low GPU/CPU)", KX.fpsBoost, 1, function(v)
+	local BoxPerf = createFieldsetBox(SetLeft, "🚀 Performance & AFK", 2)
+	addPurpleCheckbox(BoxPerf, "💨 FPS Boost (Low GPU/CPU)", KX.fpsBoost, 1, function(v)
 		KX.applyFpsBoost(v); saveConfig()
 	end)
-	addPurpleCheckbox(BoxPerf, "AFK Mode (3D Render Off)", KX.afkMode, 2, function(v)
+	addPurpleCheckbox(BoxPerf, "🌙 AFK Mode (3D Render Off)", KX.afkMode, 2, function(v)
 		KX.applyAfkMode(v); saveConfig()
 	end)
 
-	local BoxFruitCfg = createFieldsetBox(SetRight, "Fruit Gacha & Store", 1)
-	addPurpleCheckbox(BoxFruitCfg, "Auto Spin & Store Fruits", KX.autoSpinAndStoreFruits, 1, function(v)
+	local BoxFruitCfg = createFieldsetBox(SetRight, "🎰 Fruit Gacha & Store", 1)
+	addPurpleCheckbox(BoxFruitCfg, "🎲 Auto Spin & Store Fruits", KX.autoSpinAndStoreFruits, 1, function(v)
 		KX.autoSpinAndStoreFruits = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxFruitCfg, "Auto Grab Map Fruits", KX.autoGrabGroundFruits, 2, function(v)
+	addPurpleCheckbox(BoxFruitCfg, "🍎 Auto Grab Map Fruits", KX.autoGrabGroundFruits, 2, function(v)
 		KX.autoGrabGroundFruits = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxFruitCfg, "Eat Allowed Fruits Only", KX.autoEatAllowedFruits, 3, function(v)
+	addPurpleCheckbox(BoxFruitCfg, "🍽️ Eat Allowed Fruits Only", KX.autoEatAllowedFruits, 3, function(v)
 		KX.autoEatAllowedFruits = v; saveConfig()
 	end)
-	addInfoTextRow(BoxFruitCfg, "Note: All fruits are stored first unless 'Eat Allowed' is ON.", 4).TextColor3 = THEME.TextSecondary
+	addInfoTextRow(BoxFruitCfg, "ℹ️ Todas las frutas se guardan primero salvo que 'Eat Allowed' esté activo.", 4).TextColor3 = THEME.TextSecondary
 
-	local BoxEatList = createFieldsetBox(SetRight, "Allowed Fruits To Eat", 2)
+	local BoxEatList = createFieldsetBox(SetRight, "🍽️ Allowed Fruits To Eat", 2)
 	local EAT_CANDIDATES = {
-		"Buddha-Buddha",
-		"Light-Light",
-		"Magma-Magma",
-		"Ice-Ice",
-		"Flame-Flame",
-		"Gas-Gas",
-		"Kitsune-Kitsune",
+		{key = "Buddha-Buddha", label = "🟡 Buddha-Buddha"},
+		{key = "Light-Light", label = "✨ Light-Light"},
+		{key = "Magma-Magma", label = "🌋 Magma-Magma"},
+		{key = "Ice-Ice", label = "❄️ Ice-Ice"},
+		{key = "Flame-Flame", label = "🔥 Flame-Flame"},
+		{key = "Gas-Gas", label = "💨 Gas-Gas"},
+		{key = "Kitsune-Kitsune", label = "🦊 Kitsune-Kitsune"},
 	}
-	for idx, fKey in ipairs(EAT_CANDIDATES) do
-		addPurpleCheckbox(BoxEatList, fKey, KX.allowedEatFruits[fKey] == true, idx, function(v)
+	for idx, entry in ipairs(EAT_CANDIDATES) do
+		local fKey = entry.key
+		addPurpleCheckbox(BoxEatList, entry.label, KX.allowedEatFruits[fKey] == true, idx, function(v)
 			KX.allowedEatFruits[fKey] = v
 			saveConfig()
 		end)
@@ -4006,7 +4604,7 @@ do
 	end
 
 	-- =========================================================================
-	-- LIVE UI REFRESH LOOP (1s TICK)
+	-- REAL-TIME UI & MELEE/EXP REFRESH LOOP (0.35s TICK)
 	-- =========================================================================
 	local function formatCompact(n)
 		n = tonumber(n) or 0
@@ -4015,60 +4613,140 @@ do
 		elseif n >= 1e3 then
 			return string.format("%.1fK", n / 1e3)
 		end
-		return tostring(n)
+		return tostring(math.floor(n))
+	end
+
+	local function formatCommas(n)
+		local s = tostring(math.floor(tonumber(n) or 0))
+		local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+		return out
 	end
 
 	task.spawn(function()
 		while isAlive() do
 			pcall(function()
+				-- Instant real-time Melee + Mastery + EXP read on every UI frame!
+				KX.scanRealtimeMeleeAndWeapons()
+
+				if KX.autoFarm then
+					LblStateBadge.Text = "🟢 KAITUN ON"
+					LblStateBadge.TextColor3 = THEME.GreenOk
+					sbStroke.Color = THEME.GreenOk
+				else
+					LblStateBadge.Text = "🟣 STANDBY"
+					LblStateBadge.TextColor3 = THEME.TextSecondary
+					sbStroke.Color = THEME.BorderOuter
+				end
+
 				local elapsed = math.max(0, os.time() - KX.startTime)
 				local hrs = math.floor(elapsed / 3600)
 				local mins = math.floor((elapsed % 3600) / 60)
 				local secs = elapsed % 60
-				LblTime.Text = string.format("%d Hr(s), %d Min(s), %d Sec(s)", hrs, mins, secs)
+				LblTime.Text = string.format("⏳ %d Hr(s), %d Min(s), %d Sec(s)", hrs, mins, secs)
 
-				LblName.Text = "Name : " .. tostring(LocalPlayer.Name)
-				LblWorld.Text = string.format("World : %d (Lv. %d)", KX.worldNum, KX.level)
-				LblFruit.Text = "Fruit : " .. (KX.devilFruit ~= "None" and KX.devilFruit or "")
-				LblAwaken.Text = "Awaken : " .. (KX.awakenedText ~= "-" and KX.awakenedText or "")
+				LblName.Text = "🪪 Name : " .. tostring(LocalPlayer.Name)
+				LblWorld.Text = string.format("🌍 World : Sea %d  •  ⭐ Lv. %d/%d", KX.worldNum, KX.level, KX.maxLevel)
+				LblFruit.Text = "🍎 Fruit : " .. (KX.devilFruit ~= "None" and KX.devilFruit or "None")
+				LblAwaken.Text = "✨ Awaken : " .. (KX.awakenedText ~= "-" and KX.awakenedText or "-")
 
 				local rem2x = KX.getRemaining2xExpSeconds()
 				if rem2x > 0 then
-					LblExp2x.Text = string.format("2x EXP : %dm %02ds", math.floor(rem2x / 60), rem2x % 60)
+					LblExp2x.Text = string.format("🚀 2x EXP : %dm %02ds", math.floor(rem2x / 60), rem2x % 60)
 					LblExp2x.TextColor3 = THEME.GreenOk
 				else
-					LblExp2x.Text = "2x EXP : Inactive"
+					LblExp2x.Text = "🚀 2x EXP : Inactive"
 					LblExp2x.TextColor3 = THEME.TextSecondary
 				end
 
-				LblFarmStatus.Text = "Status : " .. tostring(KX.statusText)
-				LblFarmPhase.Text = "Phase : " .. tostring(KX.phaseText)
+				LblFarmStatus.Text = "📡 Status : " .. tostring(KX.statusText)
+				LblFarmPhase.Text = "🧭 Phase : " .. tostring(KX.phaseText)
+
+				-- Update Active Real-Time Melee + EXP Card
+				if KX.currentMeleeCanon ~= "None" then
+					LblActiveMeleeTitle.Text = string.format(
+						"⚡ En uso: %s %s  •  🔥 Mas. %d",
+						tostring(KX.currentMeleeIcon or "🥊"),
+						tostring(KX.currentMeleeCanon),
+						KX.currentMeleeLevel or 0
+					)
+					if (KX.currentMeleeLevel or 0) >= 600 then
+						LblActiveMeleeExp.Text = "✨ EXP: MAX (600 / 600) • 100%"
+						ExpBarFill.Size = UDim2.new(1, 0, 1, 0)
+					else
+						local curE = KX.currentMeleeExp or 0
+						local maxE = math.max(1, KX.currentMeleeMaxExp or 1)
+						local pct = math.clamp(KX.currentMeleePct or 0, 0, 100)
+						LblActiveMeleeExp.Text = string.format(
+							"✨ EXP: %s / %s  (%.1f%%)",
+							formatCommas(curE),
+							formatCommas(maxE),
+							pct
+						)
+						ExpBarFill.Size = UDim2.new(pct / 100, 0, 1, 0)
+					end
+				else
+					LblActiveMeleeTitle.Text = "⚡ En uso: Sin Melé detectada"
+					LblActiveMeleeExp.Text = "✨ EXP: - / -"
+					ExpBarFill.Size = UDim2.new(0, 0, 1, 0)
+				end
 
 				for qKey, setter in pairs(QuestRows) do
 					setter(KX.questsDone[qKey] == true)
 				end
+
 				for mName, setter in pairs(MeleeRows) do
-					local mast = KX.meleeMastery[mName]
-					local suffix = (mast and mast > 0) and (" [" .. tostring(mast) .. "]") or ""
-					setter(KX.ownedMelees[mName] == true, suffix)
-				end
-				for sName, setter in pairs(SwordRows) do
-					setter(KX.ownedSwords[sName] == true)
-				end
-				for gName, setter in pairs(GunRows) do
-					setter(KX.ownedGuns[gName] == true)
+					local isAct = (KX.currentMeleeCanon == mName)
+					local owned = (KX.ownedMelees[mName] == true) or isAct
+					local mast = KX.meleeMastery[mName] or 0
+					local expVal = KX.meleeExp[mName]
+					local maxExp = KX.meleeMaxExp[mName]
+					local suffix = ""
+					if isAct then
+						if mast >= 600 then
+							suffix = " ⚡ [Lv.600 MAX]"
+						else
+							suffix = string.format(
+								" ⚡ [Lv.%d | %s EXP %.0f%%]",
+								mast,
+								formatCompact(KX.currentMeleeExp or 0),
+								KX.currentMeleePct or 0
+							)
+						end
+					elseif mast > 0 then
+						if mast >= 600 then
+							suffix = " [Lv.600 MAX]"
+						elseif expVal and maxExp and maxExp > 0 then
+							local p = math.clamp((expVal / maxExp) * 100, 0, 100)
+							suffix = string.format(" [Lv.%d | %s EXP %.0f%%]", mast, formatCompact(expVal), p)
+						else
+							suffix = " [Lv." .. tostring(mast) .. "]"
+						end
+					end
+					setter(owned, suffix, isAct)
 				end
 
-				LblBone.Text = "Bone : " .. tostring(KX.materials["Bones"] or 0)
-				LblEcto.Text = "Ectoplasm : " .. tostring(KX.materials["Ectoplasm"] or 0)
-				LblElite.Text = "Elite Hunter : " .. tostring(KX.eliteProgress or 0)
-				LblDarkFrag.Text = "Dark Fragment : " .. tostring(KX.materials["Dark Fragment"] or 0)
-				LblCocoa.Text = "Conjured Cocoa : " .. tostring(KX.materials["Conjured Cocoa"] or 0)
-				LblAlucard.Text = "Alucard Frag : " .. tostring(KX.materials["Alucard Fragment"] or 0) .. "/6"
-				LblValkyrie.Text = "Valkyrie Helm : " .. (KX.ownedAccessories["Valkyrie Helm"] and "Yes" or "No")
-				LblCurrency.Text = string.format("Beli : %s | Frag : %s", formatCompact(KX.beli), formatCompact(KX.fragments))
+				for sName, setter in pairs(SwordRows) do
+					local sm = KX.swordMastery[sName] or 0
+					local sfx = (sm > 0) and (" [Mas. " .. tostring(sm) .. "]") or ""
+					setter(KX.ownedSwords[sName] == true, sfx, false)
+				end
+
+				for gName, setter in pairs(GunRows) do
+					local gm = KX.gunMastery[gName] or 0
+					local gfx = (gm > 0) and (" [Mas. " .. tostring(gm) .. "]") or ""
+					setter(KX.ownedGuns[gName] == true, gfx, false)
+				end
+
+				LblBone.Text = "🦴 Bone : " .. tostring(KX.materials["Bones"] or 0)
+				LblEcto.Text = "👻 Ectoplasm : " .. tostring(KX.materials["Ectoplasm"] or 0)
+				LblElite.Text = "🎯 Elite Hunter : " .. tostring(KX.eliteProgress or 0) .. "/30"
+				LblDarkFrag.Text = "🌑 Dark Fragment : " .. tostring(KX.materials["Dark Fragment"] or 0)
+				LblCocoa.Text = "🍫 Conjured Cocoa : " .. tostring(KX.materials["Conjured Cocoa"] or 0)
+				LblAlucard.Text = "🩸 Alucard Frag : " .. tostring(KX.materials["Alucard Fragment"] or 0) .. "/6"
+				LblValkyrie.Text = "🪖 Valkyrie Helm : " .. (KX.ownedAccessories["Valkyrie Helm"] and "✅ Yes" or "No")
+				LblCurrency.Text = string.format("💰 Beli : %s  |  💎 Frag : %s", formatCompact(KX.beli), formatCompact(KX.fragments))
 			end)
-			task.wait(1.0)
+			task.wait(0.35)
 		end
 	end)
 end
