@@ -69,7 +69,6 @@ for _, key in ipairs({"__SwitchHubBF", "__SwitchHubBF_V2"}) do
 		end
 	end
 end
-genv.__SwitchHubFastAim = nil
 
 -- Create a fresh state table for this execution so no old loop can ever share references
 local S = {
@@ -174,12 +173,13 @@ local S = {
 	},
 
 	-- Combat, Double Damage, Local Player & Optimization
+	preferredTeam = "Pirates",
 	doubleDamage = false, -- Attacks with Fruit M1 + hides Melee M1 hit directly behind Fruit M1
 	autoBuso = true,
 	autoKen = false,
 	autoRaceV3 = false,
 	autoRaceV4 = false,
-	walkOnWater = true,
+	walkOnWater = false,
 	noClip = false,
 	infEnergy = true,
 	infGeppo = false,
@@ -339,7 +339,6 @@ if STATE and STATE.onCleanup then
 			pcall(function() S.activeTween:Cancel() end)
 			S.activeTween = nil
 		end
-		genv.__SwitchHubFastAim = nil
 		cleanupOldGuis()
 	end)
 end
@@ -364,22 +363,23 @@ local function isAlive()
 end
 
 --------------------------------------------------------------------------------
--- SMOOTH ~5-SECOND PHASED STARTUP LOADER (GUARANTEES ALL OPTIONS & DATA LOAD)
+-- SMOOTH NON-BLOCKING STARTUP LOADER (NEVER COVERS TEAM SELECTION BUTTONS)
 --------------------------------------------------------------------------------
 do
 	local loaderGui = Instance.new("ScreenGui")
 	loaderGui.Name = "SwitchHub_Loader"
 	loaderGui.ResetOnSpawn = false
-	loaderGui.DisplayOrder = 1000000
+	loaderGui.DisplayOrder = 9600
 	loaderGui.IgnoreGuiInset = true
 	loaderGui.Parent = guiParent
 
 	local card = Instance.new("Frame")
-	card.Size = UDim2.new(0, 360, 0, 118)
-	card.AnchorPoint = Vector2.new(0.5, 0.5)
-	card.Position = UDim2.new(0.5, 0, 0.5, 0)
+	card.Size = UDim2.new(0, 360, 0, 108)
+	card.AnchorPoint = Vector2.new(0.5, 0)
+	card.Position = UDim2.new(0.5, 0, 0, 46)
 	card.BackgroundColor3 = Color3.fromRGB(19, 19, 23)
 	card.BorderSizePixel = 0
+	card.Active = false
 	card.Parent = loaderGui
 
 	local cc = Instance.new("UICorner")
@@ -461,30 +461,28 @@ do
 	bfc.Parent = barFill
 
 	local stages = {
-		{pct = 0.20, label = "1/5 Sincronizando jugador, Data y hora del servidor...", fn = function()
+		{pct = 0.25, label = "1/4 Sincronizando jugador y estado de sesión...", fn = function()
 			if not game:IsLoaded() then
 				pcall(function() game.Loaded:Wait() end)
 			end
-			if LocalPlayer then
-				LocalPlayer:WaitForChild("Data", 1.5)
+			if LocalPlayer and LocalPlayer.Team and LocalPlayer.Team.Name ~= "Neutral" then
+				LocalPlayer:WaitForChild("Data", 0.6)
 			end
 		end},
-		{pct = 0.42, label = "2/5 Cargando Remotes y controladores de combate...", fn = function()
-			ReplicatedStorage:WaitForChild("Remotes", 1.5)
-			ReplicatedStorage:WaitForChild("Modules", 1.5)
+		{pct = 0.55, label = "2/4 Cargando Remotes y rutas del Sea...", fn = function()
+			ReplicatedStorage:WaitForChild("Remotes", 1.0)
+			ReplicatedStorage:WaitForChild("Modules", 1.0)
 		end},
-		{pct = 0.65, label = "3/5 Escaneando Quests, GuideModule e islas del Sea...", fn = function()
-			local wo = Workspace:WaitForChild("_WorldOrigin", 1.5)
+		{pct = 0.80, label = "3/4 Escaneando islas y puntos de aparición...", fn = function()
+			local wo = Workspace:FindFirstChild("_WorldOrigin") or Workspace:WaitForChild("_WorldOrigin", 0.6)
 			if wo then
-				wo:WaitForChild("Locations", 1.0)
-				wo:WaitForChild("EnemySpawns", 1.0)
+				wo:WaitForChild("Locations", 0.4)
 			end
 		end},
-		{pct = 0.85, label = "4/5 Configurando Advanced Skills, Doble Daño y Bosses...", fn = function() end},
-		{pct = 1.00, label = "5/5 Aplicando optimizaciones y abriendo interfaz...", fn = function() end},
+		{pct = 1.00, label = "4/4 Preparando interfaz de Switch Hub...", fn = function() end},
 	}
 
-	local totalLoadSeconds = 5.0
+	local totalLoadSeconds = 1.6
 	local perStageSeconds = totalLoadSeconds / #stages
 
 	for _, st in ipairs(stages) do
@@ -509,7 +507,7 @@ end
 if not isAlive() then return end
 
 --------------------------------------------------------------------------------
--- BLOX FRUITS GAME MODULES & REMOTES
+-- BLOX FRUITS GAME MODULES & REMOTES (SAFE LAZY INIT AFTER TEAM SELECTION)
 --------------------------------------------------------------------------------
 local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
 local CommF_ = Remotes and Remotes:WaitForChild("CommF_", 10)
@@ -524,102 +522,24 @@ local QuestsModule = nil
 local GuideModule = nil
 local GuideData = nil
 
-do
-	local function safeRequire(modInst, timeoutSec)
-		if not modInst or typeof(modInst) ~= "Instance" or not modInst:IsA("ModuleScript") then
-			return nil
-		end
-		local done = false
-		local result = nil
-		task.spawn(function()
-			local ok, val = pcall(require, modInst)
-			if ok then
-				result = val
-			end
-			done = true
-		end)
-		local t0 = os.clock()
-		local limit = timeoutSec or 1.2
-		while not done and (os.clock() - t0 < limit) do
-			task.wait(0.03)
-		end
-		return result
-	end
-
-	-- Static data modules (safe to load before or after choosing a team)
-	QuestsModule = safeRequire(ReplicatedStorage:FindFirstChild("Quests"), 1.2)
-	local gmInst = ReplicatedStorage:FindFirstChild("GuideModule")
-	GuideModule = safeRequire(gmInst, 1.2)
-	GuideData = safeRequire(gmInst and gmInst:FindFirstChild("GuideData"), 1.2)
-	local modFolder = ReplicatedStorage:FindFirstChild("Modules")
-	CombatUtil = safeRequire(modFolder and modFolder:FindFirstChild("CombatUtil"), 1.2)
-
-	S.ensureCombatModulesLoaded = function()
-		local ctrls = ReplicatedStorage:FindFirstChild("Controllers")
-		local ccInst = ctrls and ctrls:FindFirstChild("CombatController")
-		if not CombatController and ccInst then
-			CombatController = safeRequire(ccInst, 1.2)
-		end
-		if not AimAssistModule and ccInst then
-			AimAssistModule = safeRequire(ccInst:FindFirstChild("AimAssist"), 1.2)
-		end
-		if not CombatUtil then
-			local mf = ReplicatedStorage:FindFirstChild("Modules")
-			CombatUtil = safeRequire(mf and mf:FindFirstChild("CombatUtil"), 1.2)
-		end
-		if not GlobalModule then
-			GlobalModule = safeRequire(ReplicatedStorage:FindFirstChild("Global"), 1.2)
-		end
-		if not MouseModule then
-			MouseModule = safeRequire(ReplicatedStorage:FindFirstChild("Mouse"), 1.2)
-		end
-		if S.installCombatModuleHooks then
-			pcall(S.installCombatModuleHooks)
-		end
-	end
-
-	local function isTeamChosenAndSpawned()
-		local tm = LocalPlayer and LocalPlayer.Team
-		return tm ~= nil and (tm.Name == "Pirates" or tm.Name == "Marines") and LocalPlayer.Character ~= nil
-	end
-
-	if isTeamChosenAndSpawned() then
-		S.ensureCombatModulesLoaded()
-	else
-		-- Defer character-coupled controller requires until the user selects Pirates / Marines and spawns
-		task.spawn(function()
-			while isAlive() and not isTeamChosenAndSpawned() do
-				task.wait(0.35)
-			end
-			if not isAlive() then return end
-			task.wait(0.6)
-			if isAlive() then
-				S.ensureCombatModulesLoaded()
-			end
-		end)
-	end
-end
-
 local cachedRealmSeaNum = nil
-task.spawn(function()
-	pcall(function()
-		local utilFolder = ReplicatedStorage:FindFirstChild("Util")
-		local realmMod = utilFolder and utilFolder:FindFirstChild("Realm")
-		if realmMod then
-			local Realm = require(realmMod)
-			if type(Realm.getCurrentSeaAsync) == "function" then
-				local seaStr = tostring(Realm.getCurrentSeaAsync() or "")
-				if seaStr:find("3") or seaStr:lower():find("third") then
-					cachedRealmSeaNum = 3
-				elseif seaStr:find("2") or seaStr:lower():find("second") then
-					cachedRealmSeaNum = 2
-				elseif seaStr:find("1") or seaStr:lower():find("first") then
-					cachedRealmSeaNum = 1
-				end
+
+S.isChooseTeamScreenOpen = function()
+	if not LocalPlayer.Team or LocalPlayer.Team.Name == "Neutral" then
+		return true
+	end
+	local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+	if pgui then
+		for _, guiName in ipairs({"Main (minimal)", "Main"}) do
+			local g = pgui:FindFirstChild(guiName)
+			local ct = g and g:FindFirstChild("ChooseTeam")
+			if ct and ct:IsA("GuiObject") and ct.Visible then
+				return true
 			end
 		end
-	end)
-end)
+	end
+	return false
+end
 
 local function getCurrentSeaNumber()
 	if cachedRealmSeaNum then
@@ -628,9 +548,9 @@ local function getCurrentSeaNumber()
 	local pid = game.PlaceId
 	if pid == 4442272183 or pid == 79091703265657 then
 		return 2
-	elseif pid == 7449423635 then
+	elseif pid == 7449423635 or pid == 100117331123089 then
 		return 3
-	elseif pid == 2753915549 then
+	elseif pid == 2753915549 or pid == 85211729168715 then
 		return 1
 	end
 	local map = Workspace:FindFirstChild("Map")
@@ -654,71 +574,28 @@ local function getCurrentSeaNumber()
 end
 
 --------------------------------------------------------------------------------
--- GUN & SKILL AIMBOT + ZERO BULLET SPREAD HOOKS (100% CENTER LOCK ON NPC)
+-- GUN & SKILL AIMBOT + ZERO BULLET SPREAD MODULE WRAPPERS (NO METAMETHOD HOOKS!)
 --------------------------------------------------------------------------------
 genv.__SwitchHubOrigHooks = genv.__SwitchHubOrigHooks or {}
 local OrigHooks = genv.__SwitchHubOrigHooks
-
-genv.__SwitchHubFastAim = {
-	part = nil,
-	targetPos = nil,
-	originPos = nil,
-	unitDir = nil,
-	hitCF = nil,
-	originCF = nil,
-	unitRay = nil,
-	char = nil,
-	updatedAt = 0,
-}
-
-S.isAnyAimTaskActive = function(st)
-	local cur = st or S
-	if not cur then return false end
-	return (cur.isCastingSkillAim
-		or cur.globalAutoSkills
-		or cur.levelFarm
-		or cur.bossFarm
-		or cur.allBossFarm
-		or cur.autoFirstSeaComplete
-		or cur.autoSecondSeaComplete
-		or cur.stackTaskRunning
-		or cur.othersTaskRunning
-		or cur.raidTaskRunning
-		or cur.seaTaskRunning) and true or false
-end
-
-S.syncFastAimCache = function(targetPart, originPosOverride)
-	local fa = genv.__SwitchHubFastAim
-	if not fa then return end
-	if not targetPart or not (S.masteryAimlock or S.skillAimlock) or not S.isAnyAimTaskActive(S) or not targetPart.Parent then
-		fa.part = nil
-		fa.updatedAt = 0
-		return
-	end
-	local targetPos = targetPart.Position
-	local char = LocalPlayer.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	local originPos = originPosOverride or (hrp and hrp.Position) or (targetPos + Vector3.new(0, 20, 0))
-	local d = targetPos - originPos
-	local unitDir = (d.Magnitude > 0.001) and d.Unit or Vector3.new(0, -1, 0)
-
-	fa.part = targetPart
-	fa.targetPos = targetPos
-	fa.originPos = originPos
-	fa.unitDir = unitDir
-	fa.hitCF = CFrame.lookAt(targetPos, targetPos + unitDir)
-	fa.originCF = CFrame.lookAt(originPos, targetPos)
-	fa.unitRay = Ray.new(originPos, unitDir)
-	fa.char = char
-	fa.updatedAt = os.clock()
-end
 
 local function getActiveAimlockPart()
 	local curS = genv.__SwitchHubBF_V2
 	if not curS or not (curS.masteryAimlock or curS.skillAimlock) then
 		return nil, nil
 	end
-	if not (curS.isAnyAimTaskActive and curS.isAnyAimTaskActive(curS)) then
+	local anyActiveTask = curS.isCastingSkillAim
+		or curS.globalAutoSkills
+		or curS.levelFarm
+		or curS.bossFarm
+		or curS.allBossFarm
+		or curS.autoFirstSeaComplete
+		or curS.autoSecondSeaComplete
+		or curS.stackTaskRunning
+		or curS.othersTaskRunning
+		or curS.raidTaskRunning
+		or curS.seaTaskRunning
+	if not anyActiveTask then
 		return nil, nil
 	end
 
@@ -730,9 +607,6 @@ local function getActiveAimlockPart()
 		local alive = (eHum and eHum.Health > 0)
 			or (hVal and hVal:IsA("ValueBase") and tonumber(hVal.Value) ~= nil and tonumber(hVal.Value) > 0)
 		if alive then
-			if curS.syncFastAimCache then
-				curS.syncFastAimCache(part)
-			end
 			return part, model
 		end
 	end
@@ -771,9 +645,6 @@ local function getActiveAimlockPart()
 			curS.lastAimEnemy = bestModel
 			curS.lastAimPart = bestPart
 			curS.lastAimPos = bestPart.Position
-			if curS.syncFastAimCache then
-				curS.syncFastAimCache(bestPart, hrp.Position)
-			end
 			return bestPart, bestModel
 		end
 	end
@@ -786,8 +657,10 @@ local function updateMasteryAimTarget(enemyModel)
 	if not enemyModel then
 		S.lastAimEnemy = nil
 		S.lastAimPart = nil
-		S.syncFastAimCache(nil)
 		return
+	end
+	if not MouseModule and S.ensureCombatModulesReady then
+		S.ensureCombatModulesReady(false)
 	end
 	local targetPart = enemyModel:FindFirstChild("HumanoidRootPart")
 		or enemyModel:FindFirstChild("RootPart")
@@ -797,24 +670,19 @@ local function updateMasteryAimTarget(enemyModel)
 		or enemyModel:FindFirstChild("Head")
 		or enemyModel.PrimaryPart
 		or enemyModel:FindFirstChildWhichIsA("BasePart")
-	if not targetPart then
-		S.syncFastAimCache(nil)
-		return
-	end
+	if not targetPart then return end
 
 	S.lastAimEnemy = enemyModel
 	S.lastAimPart = targetPart
 	S.lastAimPos = targetPart.Position
 
-	local cam = Workspace.CurrentCamera
-	local char = LocalPlayer.Character
-	local hrp = char and char:FindFirstChild("HumanoidRootPart")
-	local originPos = (hrp and hrp.Position) or (cam and cam.CFrame.Position) or (S.lastAimPos + Vector3.new(0, 20, 0))
-	S.syncFastAimCache(targetPart, originPos)
-
 	-- 1) Update ReplicatedStorage.Mouse so Z/X/C/V/F skills via MovesetClientRunner aim dead-center at the NPC
 	if MouseModule then
 		pcall(function()
+			local cam = Workspace.CurrentCamera
+			local char = LocalPlayer.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			local originPos = (hrp and hrp.Position) or (cam and cam.CFrame.Position) or (S.lastAimPos + Vector3.new(0, 20, 0))
 			local dir = (S.lastAimPos - originPos)
 			local unitDir = (dir.Magnitude > 0.001) and dir.Unit or Vector3.new(0, -1, 0)
 			MouseModule.Hit = CFrame.lookAt(S.lastAimPos, S.lastAimPos + unitDir)
@@ -825,6 +693,7 @@ local function updateMasteryAimTarget(enemyModel)
 	end
 
 	-- 2) Update equipped tool's MousePos Vector3Value if present
+	local char = LocalPlayer.Character
 	if char then
 		for _, item in ipairs(char:GetChildren()) do
 			if item:IsA("Tool") then
@@ -837,243 +706,190 @@ local function updateMasteryAimTarget(enemyModel)
 	end
 end
 
-S.installCombatModuleHooks = function()
-	-- Hook 1: AimAssist.getTargetInfo -> Makes CombatController & modern Skills lock directly onto the NPC part
-	if AimAssistModule and type(AimAssistModule.getTargetInfo) == "function" then
-		if not OrigHooks.getTargetInfo then
-			OrigHooks.getTargetInfo = AimAssistModule.getTargetInfo
-		end
-		AimAssistModule.getTargetInfo = function(...)
-			local part, model = getActiveAimlockPart()
-			if part and model then
-				local char = LocalPlayer.Character
-				local hrp = char and char:FindFirstChild("HumanoidRootPart")
-				local dist = hrp and (part.Position - hrp.Position).Magnitude or 20
-				return {
-					Part = part,
-					Position = part.Position,
-					Model = model,
-					Humanoid = model:FindFirstChildOfClass("Humanoid"),
-					Distance = dist,
-				}
-			end
-			return OrigHooks.getTargetInfo(...)
-		end
-	end
-
-	-- Hook 2: CombatUtil.GetTargetPosition -> Guarantees Gun & Skill raycast target position is exact center of NPC
-	if CombatUtil and type(CombatUtil.GetTargetPosition) == "function" then
-		if not OrigHooks.GetTargetPosition then
-			OrigHooks.GetTargetPosition = CombatUtil.GetTargetPosition
-		end
-		CombatUtil.GetTargetPosition = function(...)
-			local part = getActiveAimlockPart()
-			if part then
-				return part.Position
-			end
-			return OrigHooks.GetTargetPosition(...)
-		end
-	end
-
-	-- Hook 3: CombatUtil.CreateShootAngles -> Eliminates random bullet spread (±6° deviation) so 100% of shots hit
-	if CombatUtil and type(CombatUtil.CreateShootAngles) == "function" then
-		if not OrigHooks.CreateShootAngles then
-			OrigHooks.CreateShootAngles = CombatUtil.CreateShootAngles
-		end
-		CombatUtil.CreateShootAngles = function(self, shootData, ...)
-			local part = getActiveAimlockPart()
-			if part then
-				local count = (type(shootData) == "table" and tonumber(shootData.BulletSpreadCount)) or 1
-				local res = {}
-				for i = 1, math.max(1, count) do
-					res[i] = {Angle = CFrame.Angles(0, 0, 0)}
-				end
-				return res
-			end
-			return OrigHooks.CreateShootAngles(self, shootData, ...)
-		end
-	end
-
-	-- Hook 4: GlobalModule.updateMouseWrapper -> Prevents screen cursor from overwriting MouseModule.Hit during Aimlock
-	if GlobalModule and type(GlobalModule.updateMouseWrapper) == "function" then
-		if not OrigHooks.updateMouseWrapper then
-			OrigHooks.updateMouseWrapper = GlobalModule.updateMouseWrapper
-		end
-		GlobalModule.updateMouseWrapper = function(...)
-			local part = getActiveAimlockPart()
-			if not part or not MouseModule then
-				return OrigHooks.updateMouseWrapper(...)
-			end
-			local ret = OrigHooks.updateMouseWrapper(...)
-			pcall(function()
-				local char = LocalPlayer.Character
-				local hrp = char and char:FindFirstChild("HumanoidRootPart")
-				local originPos = (hrp and hrp.Position) or (part.Position + Vector3.new(0, 20, 0))
-				local dir = (part.Position - originPos)
-				local unitDir = (dir.Magnitude > 0.001) and dir.Unit or Vector3.new(0, -1, 0)
-				MouseModule.Hit = CFrame.lookAt(part.Position, part.Position + unitDir)
-				MouseModule.Target = part
-				MouseModule.Origin = CFrame.lookAt(originPos, part.Position)
-				MouseModule.UnitRay = Ray.new(originPos, unitDir)
-			end)
-			return ret
-		end
-	end
-end
-S.installCombatModuleHooks()
-
--- Hook 5 (Safe V2 — Zero Colon Calls): PlayerMouse (__index) & Equipped Tool Skill Remotes (__namecall)
--- IMPORTANT: Never execute any `:method()` (NAMECALL) inside __index or __namecall so `L->namecall` is NEVER overwritten
--- when Blox Fruits invokes SetTeam ("Pirates"/"Marines"), NPC dialogues, shops, inventory, or native game actions!
 do
-	genv.__SwitchHubIndexImpl = function(oldIndex, self, key)
-		if key == "Hit" or key == "Target" or key == "UnitRay" or key == "Origin" then
-			local fa = genv.__SwitchHubFastAim
-			if fa and fa.part and (os.clock() - fa.updatedAt < 0.45) and not (checkcaller and checkcaller()) then
-				if typeof(self) == "Instance" then
-					local okC, cls = pcall(oldIndex, self, "ClassName")
-					if okC and (cls == "PlayerMouse" or cls == "Mouse") then
-						if key == "Hit" then
-							return fa.hitCF
-						elseif key == "Target" then
-							return fa.part
-						elseif key == "Origin" then
-							return fa.originCF
-						elseif key == "UnitRay" then
-							return fa.unitRay
-						end
-					end
+	local function applyModuleAimHooks()
+		-- Hook 1: AimAssist.getTargetInfo -> Makes CombatController & modern Skills lock directly onto the NPC part
+		if AimAssistModule and type(AimAssistModule.getTargetInfo) == "function" then
+			if not OrigHooks.getTargetInfo then
+				OrigHooks.getTargetInfo = AimAssistModule.getTargetInfo
+			end
+			AimAssistModule.getTargetInfo = function(...)
+				local getter = genv.__SwitchHubGetAimPart
+				local part, model = getter and getter()
+				if part and model then
+					local char = LocalPlayer.Character
+					local hrp = char and char:FindFirstChild("HumanoidRootPart")
+					local dist = hrp and (part.Position - hrp.Position).Magnitude or 20
+					return {
+						Part = part,
+						Position = part.Position,
+						Model = model,
+						Humanoid = model:FindFirstChildOfClass("Humanoid"),
+						Distance = dist,
+					}
 				end
+				return OrigHooks.getTargetInfo(...)
 			end
 		end
-		return oldIndex(self, key)
-	end
 
-	genv.__SwitchHubNamecallImpl = function(oldNamecall, self, ...)
-		local fa = genv.__SwitchHubFastAim
-		if fa and fa.part and (os.clock() - fa.updatedAt < 0.45) and not (checkcaller and checkcaller()) then
-			local idxFn = OrigHooks.oldIndex
-			local method = getnamecallmethod and getnamecallmethod()
-			if idxFn and (method == "FireServer" or method == "InvokeServer") and typeof(self) == "Instance" then
-				local okCls, cls = pcall(idxFn, self, "ClassName")
-				if okCls and (cls == "RemoteEvent" or cls == "RemoteFunction") then
-					local curChar = fa.char
-					local inEquippedTool = false
-					if curChar then
-						local foundTool = false
-						local curObj = self
-						for _ = 1, 8 do
-							local okP, nextP = pcall(idxFn, curObj, "Parent")
-							if not okP or not nextP then break end
-							if nextP == curChar then
-								inEquippedTool = foundTool
-								break
-							end
-							if not foundTool then
-								local okPC, pCls = pcall(idxFn, nextP, "ClassName")
-								if okPC and pCls == "Tool" then
-									foundTool = true
-								end
-							end
-							curObj = nextP
-						end
-					end
-					if inEquippedTool then
-						local targetPos = fa.targetPos
-						local originPos = fa.originPos
-						local unitDir = fa.unitDir
-						local args = {...}
-						local nArgs = select("#", ...)
-						local worldVecCount = 0
-						for i = 1, math.min(nArgs, 4) do
-							local v = args[i]
-							if typeof(v) == "Vector3" and v.Magnitude > 4 then
-								worldVecCount = worldVecCount + 1
-							end
-						end
-						local modified = false
-						local keptOrigin = false
-						for i = 1, math.min(nArgs, 4) do
-							local v = args[i]
-							if typeof(v) == "Vector3" then
-								if v.Magnitude > 0.94 and v.Magnitude < 1.06 then
-									args[i] = unitDir
-									modified = true
-								elseif v.Magnitude > 4 then
-									if worldVecCount >= 2 and not keptOrigin and (v - originPos).Magnitude < 18 then
-										keptOrigin = true
-									else
-										args[i] = targetPos
-										modified = true
-									end
-								end
-							elseif typeof(v) == "CFrame" then
-								if (v.Position - originPos).Magnitude < 18 then
-									args[i] = CFrame.lookAt(v.Position, targetPos)
-								else
-									args[i] = fa.hitCF
-								end
-								modified = true
-							end
-						end
-						if modified then
-							if setnamecallmethod and method then
-								pcall(setnamecallmethod, method)
-							end
-							return oldNamecall(self, unpack(args, 1, nArgs))
-						end
-					end
+		-- Hook 2: CombatUtil.GetTargetPosition -> Guarantees Gun & Skill raycast target position is exact center of NPC
+		if CombatUtil and type(CombatUtil.GetTargetPosition) == "function" then
+			if not OrigHooks.GetTargetPosition then
+				OrigHooks.GetTargetPosition = CombatUtil.GetTargetPosition
+			end
+			CombatUtil.GetTargetPosition = function(self, originPos, aimPos, range)
+				local getter = genv.__SwitchHubGetAimPart
+				local part = getter and getter()
+				if part then
+					return part.Position
 				end
-				if setnamecallmethod and method then
-					pcall(setnamecallmethod, method)
-				end
+				return OrigHooks.GetTargetPosition(self, originPos, aimPos, range)
 			end
 		end
-		return oldNamecall(self, ...)
+
+		-- Hook 3: CombatUtil.CreateShootAngles -> Eliminates random bullet spread (±6° deviation) so 100% of shots hit
+		if CombatUtil and type(CombatUtil.CreateShootAngles) == "function" then
+			if not OrigHooks.CreateShootAngles then
+				OrigHooks.CreateShootAngles = CombatUtil.CreateShootAngles
+			end
+			CombatUtil.CreateShootAngles = function(self, shootData)
+				local getter = genv.__SwitchHubGetAimPart
+				local part = getter and getter()
+				if part then
+					local count = (type(shootData) == "table" and tonumber(shootData.BulletSpreadCount)) or 1
+					local res = {}
+					for i = 1, math.max(1, count) do
+						res[i] = {Angle = CFrame.Angles(0, 0, 0)}
+					end
+					return res
+				end
+				return OrigHooks.CreateShootAngles(self, shootData)
+			end
+		end
+
+		-- Hook 4: GlobalModule.updateMouseWrapper -> Prevents screen cursor from overwriting MouseModule.Hit during Aimlock
+		if GlobalModule and type(GlobalModule.updateMouseWrapper) == "function" then
+			if not OrigHooks.updateMouseWrapper then
+				OrigHooks.updateMouseWrapper = GlobalModule.updateMouseWrapper
+			end
+			GlobalModule.updateMouseWrapper = function(...)
+				local ret = OrigHooks.updateMouseWrapper(...)
+				local getter = genv.__SwitchHubGetAimPart
+				local part = getter and getter()
+				if part and MouseModule then
+					pcall(function()
+						local char = LocalPlayer.Character
+						local hrp = char and char:FindFirstChild("HumanoidRootPart")
+						local originPos = (hrp and hrp.Position) or (part.Position + Vector3.new(0, 20, 0))
+						local dir = (part.Position - originPos)
+						local unitDir = (dir.Magnitude > 0.001) and dir.Unit or Vector3.new(0, -1, 0)
+						MouseModule.Hit = CFrame.lookAt(part.Position, part.Position + unitDir)
+						MouseModule.Target = part
+						MouseModule.Origin = CFrame.lookAt(originPos, part.Position)
+						MouseModule.UnitRay = Ray.new(originPos, unitDir)
+					end)
+				end
+				return ret
+			end
+		end
 	end
 
-	-- Heal any pre-V2 metamethod hook if running inside a session that supports restorefunction
-	if OrigHooks.metamethodsInstalled and not OrigHooks.metamethodsSafeV2 then
+	S.ensureCombatModulesReady = function(forceDataModules)
+		if not QuestsModule then
+			pcall(function()
+				local q = ReplicatedStorage:FindFirstChild("Quests")
+				if q then QuestsModule = require(q) end
+			end)
+		end
+		if not GuideModule then
+			pcall(function()
+				local gm = ReplicatedStorage:FindFirstChild("GuideModule")
+				if gm then GuideModule = require(gm) end
+			end)
+		end
+		if not GuideData then
+			pcall(function()
+				local gm = ReplicatedStorage:FindFirstChild("GuideModule")
+				local gd = gm and gm:FindFirstChild("GuideData")
+				if gd then GuideData = require(gd) end
+			end)
+		end
+
+		-- Never require character/HUD controllers while the player is still on the Choose Team screen!
+		if S.isChooseTeamScreenOpen() or not LocalPlayer.Character then
+			return forceDataModules == true
+		end
+
+		local loadedNew = false
+		if not CombatController then
+			pcall(function()
+				local ctrl = ReplicatedStorage:FindFirstChild("Controllers")
+				local cc = ctrl and ctrl:FindFirstChild("CombatController")
+				if cc then CombatController = require(cc); loadedNew = true end
+			end)
+		end
+		if not AimAssistModule then
+			pcall(function()
+				local ctrl = ReplicatedStorage:FindFirstChild("Controllers")
+				local cc = ctrl and ctrl:FindFirstChild("CombatController")
+				local aa = cc and cc:FindFirstChild("AimAssist")
+				if aa then AimAssistModule = require(aa); loadedNew = true end
+			end)
+		end
+		if not CombatUtil then
+			pcall(function()
+				local mods = ReplicatedStorage:FindFirstChild("Modules")
+				local cu = mods and mods:FindFirstChild("CombatUtil")
+				if cu then CombatUtil = require(cu); loadedNew = true end
+			end)
+		end
+		if not GlobalModule then
+			pcall(function()
+				local gl = ReplicatedStorage:FindFirstChild("Global")
+				if gl then GlobalModule = require(gl); loadedNew = true end
+			end)
+		end
+		if not MouseModule then
+			pcall(function()
+				local ms = ReplicatedStorage:FindFirstChild("Mouse")
+				if ms then MouseModule = require(ms); loadedNew = true end
+			end)
+		end
+		if loadedNew then
+			applyModuleAimHooks()
+		end
+		return true
+	end
+
+	-- Background initializer: waits until player has selected Pirates/Marines and spawned before requiring controllers
+	task.spawn(function()
+		local wasWaitingForTeam = S.isChooseTeamScreenOpen() or (LocalPlayer.Character == nil)
+		while isAlive() and (S.isChooseTeamScreenOpen() or not (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart"))) do
+			task.wait(0.35)
+		end
+		if not isAlive() then return end
+		if wasWaitingForTeam then
+			task.wait(0.8) -- Let Blox Fruits' own LocalScripts finish initializing controllers first
+		end
+		S.ensureCombatModulesReady(true)
 		pcall(function()
-			if typeof(restorefunction) == "function" and typeof(getrawmetatable) == "function" then
-				local mt = getrawmetatable(game)
-				if mt then
-					local curIdx = rawget(mt, "__index")
-					local curNc = rawget(mt, "__namecall")
-					if curIdx then pcall(restorefunction, curIdx) end
-					if curNc then pcall(restorefunction, curNc) end
-					OrigHooks.metamethodsInstalled = false
+			local utilFolder = ReplicatedStorage:FindFirstChild("Util")
+			local realmMod = utilFolder and utilFolder:FindFirstChild("Realm")
+			if realmMod then
+				local Realm = require(realmMod)
+				if type(Realm.getCurrentSeaAsync) == "function" then
+					local seaStr = tostring(Realm.getCurrentSeaAsync() or "")
+					if seaStr:find("3") or seaStr:lower():find("third") then
+						cachedRealmSeaNum = 3
+					elseif seaStr:find("2") or seaStr:lower():find("second") then
+						cachedRealmSeaNum = 2
+					elseif seaStr:find("1") or seaStr:lower():find("first") then
+						cachedRealmSeaNum = 1
+					end
 				end
 			end
 		end)
-	end
-
-	if typeof(hookmetamethod) == "function" and not OrigHooks.metamethodsInstalled then
-		pcall(function()
-			local oldIndex
-			oldIndex = hookmetamethod(game, "__index", function(self, key)
-				local fn = genv.__SwitchHubIndexImpl
-				if fn then
-					return fn(oldIndex, self, key)
-				end
-				return oldIndex(self, key)
-			end)
-			OrigHooks.oldIndex = oldIndex
-
-			local oldNamecall
-			oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
-				local fn = genv.__SwitchHubNamecallImpl
-				if fn then
-					return fn(oldNamecall, self, ...)
-				end
-				return oldNamecall(self, ...)
-			end)
-			OrigHooks.oldNamecall = oldNamecall
-
-			OrigHooks.metamethodsInstalled = true
-			OrigHooks.metamethodsSafeV2 = true
-		end)
-	end
+	end)
 end
 
 local onStatusChanged = nil
@@ -1084,39 +900,18 @@ local function setStatus(msg)
 	end
 end
 
-local lastTeamSelectAttempt = 0
 local function ensureTeamSelected()
-	local tm = LocalPlayer.Team
-	if tm and (tm.Name == "Pirates" or tm.Name == "Marines") then
-		if S.ensureCombatModulesLoaded and not CombatController then
-			task.spawn(S.ensureCombatModulesLoaded)
+	if not LocalPlayer.Team or LocalPlayer.Team.Name == "Neutral" then
+		if CommF_ then
+			local wanted = (S.preferredTeam == "Marines") and "Marines" or "Pirates"
+			pcall(function()
+				CommF_:InvokeServer("SetTeam", wanted)
+			end)
 		end
-		return
 	end
-	if os.clock() - lastTeamSelectAttempt < 2.0 then
-		return
+	if S.ensureCombatModulesReady then
+		S.ensureCombatModulesReady(true)
 	end
-	lastTeamSelectAttempt = os.clock()
-	task.spawn(function()
-		pcall(function()
-			if CommF_ then
-				CommF_:InvokeServer("SetTeam", S.preferredTeam or "Pirates")
-			end
-			local newTm = LocalPlayer.Team
-			if newTm and (newTm.Name == "Pirates" or newTm.Name == "Marines") then
-				local pgui = LocalPlayer:FindFirstChild("PlayerGui")
-				if pgui then
-					local lg = pgui:FindFirstChild("LoadingGui")
-					if lg and lg.Enabled then lg.Enabled = false end
-					local ts = pgui:FindFirstChild("TeamSelection")
-					if ts and ts.Enabled then ts.Enabled = false end
-				end
-				if S.ensureCombatModulesLoaded then
-					S.ensureCombatModulesLoaded()
-				end
-			end
-		end)
-	end)
 end
 
 --------------------------------------------------------------------------------
@@ -1364,6 +1159,9 @@ do
 	-- DOBLE DAÑO: Executes a hidden Melee M1 hit tucked right inside the Blox Fruit M1 recovery window
 	local function weaveHiddenMeleeBehindFruitM1(char, fruitTool, primaryEnemy)
 		if not S.doubleDamage or weavingDoubleDamage or isCastingGlobalSkill then return end
+		if not CombatController and S.ensureCombatModulesReady then
+			S.ensureCombatModulesReady(false)
+		end
 		local meleeTool = getToolByWeaponType("Melee")
 		if not meleeTool or meleeTool == fruitTool then return end
 
@@ -1497,6 +1295,9 @@ do
 		end
 
 		if weavingDoubleDamage or isCastingGlobalSkill then return false end
+		if not MouseModule and S.ensureCombatModulesReady then
+			S.ensureCombatModulesReady(false)
+		end
 		local now = os.clock()
 		if now < nextAllowedSkillClock or (now - lastGlobalSkillClock < 0.45) then
 			return false
@@ -1622,9 +1423,6 @@ do
 					if (S.skillAimlock or S.masteryAimlock) and aimPart and aimPart.Parent and hrp and hrp.Parent then
 						local aimPos = aimPart.Position
 						S.lastAimPos = aimPos
-						if S.syncFastAimCache then
-							S.syncFastAimCache(aimPart, hrp.Position)
-						end
 						local delta = (aimPos - hrp.Position)
 						local unitDir = (delta.Magnitude > 0.001) and delta.Unit or Vector3.new(0, -1, 0)
 
@@ -1749,6 +1547,9 @@ do
 
 		local char = LocalPlayer.Character
 		if not char then return end
+		if not CombatController and S.ensureCombatModulesReady then
+			S.ensureCombatModulesReady(false)
+		end
 
 		ensureBusoHaki()
 		local targetWType = weaponTypeOverride or S.weaponType
@@ -1844,9 +1645,6 @@ local function clearFarmMover()
 	S.lastTweenTarget = nil
 	S.lastAimEnemy = nil
 	S.lastAimPart = nil
-	if S.syncFastAimCache then
-		S.syncFastAimCache(nil)
-	end
 	S.islandTweenBusy = false
 	local char = LocalPlayer.Character
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -2401,6 +2199,9 @@ local SecretQuestBlacklist = {
 }
 
 local function getBestQuestForPlayer()
+	if not QuestsModule and S.ensureCombatModulesReady then
+		S.ensureCombatModulesReady(true)
+	end
 	local levelObj = LocalPlayer:FindFirstChild("Data") and LocalPlayer.Data:FindFirstChild("Level")
 	local rawLevel = levelObj and levelObj.Value or 1
 	-- Standard Max Level is 2800 (Submerged Island quests up to Lv. 2700-2800)
@@ -2488,6 +2289,9 @@ end
 
 -- Uses GuideData.Data.QuestData first (authoritative client state), with TrackedQuestFrame fallback
 local function getActiveQuestStatus(expectedQuestGroup, expectedMobName)
+	if not GuideData and S.ensureCombatModulesReady then
+		S.ensureCombatModulesReady(true)
+	end
 	-- 1) Authoritative check via GuideData.Data.QuestData
 	if GuideData and GuideData.Data then
 		local qd = GuideData.Data.QuestData
@@ -2949,8 +2753,17 @@ local function buyShopItem(itemName)
 end
 
 local NPCManagerModule = nil
-pcall(function()
-	NPCManagerModule = require(ReplicatedStorage:FindFirstChild("NPCManager"))
+task.spawn(function()
+	while isAlive() and ((S.isChooseTeamScreenOpen and S.isChooseTeamScreenOpen()) or not LocalPlayer.Character) do
+		task.wait(0.5)
+	end
+	if not isAlive() then return end
+	pcall(function()
+		local nm = ReplicatedStorage:FindFirstChild("NPCManager")
+		if nm then
+			NPCManagerModule = require(nm)
+		end
+	end)
 end)
 
 local storeAnyFruitsInInventory
@@ -3127,8 +2940,11 @@ do
 	end
 	S.hasSpecialMicrochipTool = hasSpecialMicrochipTool
 
+	local failedStoreCooldown = setmetatable({}, {__mode = "k"})
+
 	storeAnyFruitsInInventory = function()
 		if not S.autoStoreFruits or not CommF_ then return end
+		if (S.isChooseTeamScreenOpen and S.isChooseTeamScreenOpen()) or not LocalPlayer.Character then return end
 		pcall(function()
 			-- If "Get Fruit in Inventory Low Beli" is active and player still needs a Raid Microchip,
 			-- keep 1 cheapest (< 1M Beli) physical fruit in Backpack so RaidsNpc trades it for the chip!
@@ -3182,12 +2998,21 @@ do
 				end
 			end
 
+			local now = os.clock()
 			for _, cont in ipairs(containers) do
 				if cont then
 					for _, tool in ipairs(cont:GetChildren()) do
 						if isPhysicalFruitTool(tool) and tool ~= protectedTool and tool ~= trevorProtected then
-							local origName = getToolStorageKeyAndPrice(tool)
-							CommF_:InvokeServer("StoreFruit", origName, tool)
+							if now >= (failedStoreCooldown[tool] or 0) then
+								local origName = getToolStorageKeyAndPrice(tool)
+								local ok, res = pcall(function()
+									return CommF_:InvokeServer("StoreFruit", origName, tool)
+								end)
+								if (not ok) or res == false or (tool.Parent == LocalPlayer.Character or tool.Parent == LocalPlayer:FindFirstChild("Backpack")) then
+									-- Storage slot full (e.g. 1/1): wait 25s before retrying this tool so we never spam remotes!
+									failedStoreCooldown[tool] = os.clock() + 25.0
+								end
+							end
 						end
 					end
 				end
@@ -3613,7 +3438,7 @@ end
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "SwitchHub_BloxFruits"
 ScreenGui.ResetOnSpawn = false
-ScreenGui.DisplayOrder = 999999
+ScreenGui.DisplayOrder = 9500
 ScreenGui.IgnoreGuiInset = true
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = guiParent
@@ -6675,6 +6500,34 @@ CardServerHop:AddButton(
 		end)
 	end
 )
+CardServerHop:AddButton(
+	"Elegir / Cambiar Bando: Pirates",
+	"Selecciona o cambia inmediatamente al bando de Piratas",
+	"Pirates",
+	function()
+		S.preferredTeam = "Pirates"
+		if CommF_ then
+			task.spawn(function()
+				pcall(function() CommF_:InvokeServer("SetTeam", "Pirates") end)
+				setStatus("🏴‍☠️ Bando seleccionado: Pirates")
+			end)
+		end
+	end
+)
+CardServerHop:AddButton(
+	"Elegir / Cambiar Bando: Marines",
+	"Selecciona o cambia inmediatamente al bando de Marines",
+	"Marines",
+	function()
+		S.preferredTeam = "Marines"
+		if CommF_ then
+			task.spawn(function()
+				pcall(function() CommF_:InvokeServer("SetTeam", "Marines") end)
+				setStatus("⚓ Bando seleccionado: Marines")
+			end)
+		end
+	end
+)
 CardServerHop:AddToggle(
 	"Safe Hop on Player Nearby",
 	"Cambia de servidor si otro jugador se acerca a tu zona de farm",
@@ -6886,6 +6739,22 @@ connect(LocalPlayer.Idled, function()
 	end)
 end)
 
+-- If player has NOT chosen Pirates/Marines yet, keep MainWindow minimized to FloatBtn so team buttons stay 100% uncovered,
+-- then pop MainWindow open automatically as soon as they choose their team!
+if S.isChooseTeamScreenOpen and S.isChooseTeamScreenOpen() then
+	MainWindow.Visible = false
+	FloatBtn.Visible = true
+	task.spawn(function()
+		while isAlive() and S.isChooseTeamScreenOpen and S.isChooseTeamScreenOpen() do
+			task.wait(0.25)
+		end
+		if isAlive() and not MainWindow.Visible then
+			MainWindow.Visible = true
+			FloatBtn.Visible = false
+		end
+	end)
+end
+
 --------------------------------------------------------------------------------
 -- BACKGROUND LOOPS (FARM, STACK FARMING, MASTERY PRIORITY, COMBAT, FRUITS, ESP)
 --------------------------------------------------------------------------------
@@ -6893,6 +6762,7 @@ do
 	local cachedSteppedChar = nil
 	local cachedSteppedParts = {}
 	local lastCharPartsRefresh = 0
+	local waterPlaneElevated = false
 
 	local function getCachedCharacterParts(char)
 		local now = os.clock()
@@ -6911,6 +6781,7 @@ do
 
 	connect(RunService.Stepped, function()
 		local char = LocalPlayer.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if char then
 			if S.levelFarm or S.bossFarm or S.allBossFarm or S.autoFirstSeaComplete or S.autoSecondSeaComplete or S.stackTaskRunning or S.othersTaskRunning or S.raidTaskRunning or S.seaTaskRunning or S.styleShopBusy or S.islandTweenBusy or S.noClip then
 				for _, part in ipairs(getCachedCharacterParts(char)) do
@@ -6924,11 +6795,8 @@ do
 					char.Energy.Value = char.Energy.MaxValue
 				end)
 			end
-			if S.customSpeedEnabled then
-				local hum = char:FindFirstChildOfClass("Humanoid")
-				if hum then
-					hum.WalkSpeed = S.customWalkSpeed
-				end
+			if S.customSpeedEnabled and hum then
+				hum.WalkSpeed = S.customWalkSpeed
 			end
 		end
 		if (S.autoSeaEvent or S.autoMultiFindLevi or S.leviOwnerAutoBuyBoat or S.autoStartLeviathan or S.autoAttackLeviathan or S.autoMultiSegmentsLevi or S.autoDeliverLeviHeart or S.autoSpawnKitsune or S.seaTaskRunning) and S.seaClearFog then
@@ -6945,20 +6813,25 @@ do
 				end
 			end)
 		end
-		if (S.masteryAimlock or S.skillAimlock) and S.isAnyAimTaskActive and S.isAnyAimTaskActive(S) and S.lastAimEnemy and S.lastAimEnemy.Parent then
+		if getActiveAimlockPart() ~= nil and S.lastAimEnemy and S.lastAimEnemy.Parent then
 			updateMasteryAimTarget(S.lastAimEnemy)
-		elseif S.lastAimPart and not (S.isAnyAimTaskActive and S.isAnyAimTaskActive(S)) then
-			S.lastAimEnemy = nil
-			S.lastAimPart = nil
-			if S.syncFastAimCache then
-				S.syncFastAimCache(nil)
-			end
 		end
-		if S.walkOnWater then
+		local shouldElevateWater = S.walkOnWater and (hum ~= nil and hum.SeatPart == nil)
+		if shouldElevateWater or waterPlaneElevated then
 			local map = Workspace:FindFirstChild("Map")
 			local water = map and map:FindFirstChild("WaterBase-Plane")
 			if water and water:IsA("BasePart") then
-				water.Size = Vector3.new(water.Size.X, 80, water.Size.Z)
+				if shouldElevateWater then
+					if math.abs(water.Size.Y - 112) > 0.5 then
+						water.Size = Vector3.new(water.Size.X, 112, water.Size.Z)
+					end
+					waterPlaneElevated = true
+				else
+					if math.abs(water.Size.Y - 80) > 0.5 then
+						water.Size = Vector3.new(water.Size.X, 80, water.Size.Z)
+					end
+					waterPlaneElevated = false
+				end
 			end
 		end
 	end)
@@ -12382,9 +12255,6 @@ do
 		S.lastAimEnemy = targetModel
 		S.lastAimPart = targetPart
 		S.lastAimPos = targetPart.Position
-		if S.syncFastAimCache then
-			S.syncFastAimCache(targetPart)
-		end
 		if MouseModule then
 			pcall(function()
 				local cam = Workspace.CurrentCamera
@@ -13203,6 +13073,9 @@ do
 			task.wait(1.2)
 			pcall(function()
 				if not isAlive() then return end
+				if (S.isChooseTeamScreenOpen and S.isChooseTeamScreenOpen()) or not LocalPlayer.Character then
+					return
+				end
 
 				-- 1) Auto Stats
 				if S.autoStats and CommF_ then
