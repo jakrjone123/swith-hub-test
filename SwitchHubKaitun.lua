@@ -4824,6 +4824,19 @@ task.spawn(function()
 	end
 end)
 
+-- Auto-Requeue on Sea Travel / Server Hop so 1-Click Kaitun continues seamlessly across servers!
+connect(LocalPlayer.OnTeleport, function()
+	if not isAlive() or KX.teleportQueued then return end
+	KX.teleportQueued = true
+	saveConfig()
+	pcall(function()
+		local qfn = queue_on_teleport or queueteleport or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+		if typeof(qfn) == "function" then
+			qfn('loadstring(game:HttpGet("https://raw.githubusercontent.com/jakrjone123/swith-hub-test/refs/heads/main/SwitchHubKaitun.lua"))()')
+		end
+	end)
+end)
+
 pcall(function()
 	if typeof(writefile) == "function" then
 		writefile("mcp/switch_hub_kaitun_loaded", tostring(os.time()))
