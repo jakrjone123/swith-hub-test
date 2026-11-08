@@ -1435,12 +1435,12 @@ do
 		local targetPos = targetCF.Position
 
 		-- Deterministic Sea 1 Upper Skylands (SkyArea2) instant portal routing
-		if KX.worldNum == 1 and CommF_ and (os.clock() - lastPortalClock >= 2.5) then
-			if targetPos.Y > 3500 and hrp.Position.Y < 3500 then
+		if KX.worldNum == 1 and CommF_ then
+			if targetPos.Y > 3500 and hrp.Position.Y < 3500 and (os.clock() - lastPortalClock >= 2.5) then
 				local map = Workspace:FindFirstChild("Map")
 				local sky2 = map and map:FindFirstChild("SkyArea2")
 				local entPt = sky2 and sky2:FindFirstChild("EntrancePoint")
-				local sky2Vec = (entPt and entPt:IsA("BasePart") and entPt.Position) or Vector3.new(-5949.1, 5467.9, 2086.5)
+				local sky2Vec = (entPt and entPt:IsA("BasePart") and entPt.Position) or Vector3.new(-6023.58, 5469.72, 2203.31)
 				lastPortalClock = os.clock()
 				if KX.invokeRequestEntrance(sky2Vec) then
 					task.wait(0.28)
@@ -1448,13 +1448,24 @@ do
 				end
 			elseif targetPos.Y < 2000 and hrp.Position.Y > 3500 then
 				local map = Workspace:FindFirstChild("Map")
+				local sky2 = map and map:FindFirstChild("SkyArea2")
+				local sky2Exit = sky2 and sky2:FindFirstChild("Exit")
+				local sky2ExitVec = (sky2Exit and sky2Exit:IsA("BasePart") and sky2Exit.Position) or Vector3.new(-6022.24, 5470.50, 2217.33)
 				local sky1 = map and map:FindFirstChild("Sky")
 				local exitPt = sky1 and sky1:FindFirstChild("ExitPoint")
-				local sky1Vec = (exitPt and exitPt:IsA("BasePart") and exitPt.Position) or Vector3.new(-4248.4, 1102.2, -369.5)
-				lastPortalClock = os.clock()
-				if KX.invokeRequestEntrance(sky1Vec) then
-					task.wait(0.28)
+				local sky1Vec = (exitPt and exitPt:IsA("BasePart") and exitPt.Position) or Vector3.new(-4166.61, 1093.70, -347.16)
+				if (hrp.Position - sky2ExitVec).Magnitude <= 30 then
+					hrp.CFrame = CFrame.new(sky2ExitVec)
+					if os.clock() - lastPortalClock >= 1.8 then
+						lastPortalClock = os.clock()
+						if KX.invokeRequestEntrance(sky1Vec) then
+							task.wait(0.28)
+							return false
+						end
+					end
 					return false
+				elseif (hrp.Position - sky2ExitVec).Magnitude <= 950 then
+					targetPos = sky2ExitVec
 				end
 			end
 		end
@@ -2148,10 +2159,19 @@ do
 		local effLvl = math.clamp(KX.level, 1, KX.maxLevel)
 		local spMap = KX.getSpawnMap()
 		local npcPosMap = {}
+		local skyExp1LowerCF = nil
+		local skyExp1UpperCF = nil
 		local hasGuide = false
 		if GuideModule and GuideModule.Data and GuideModule.Data.NPCList then
 			for _, nd in pairs(GuideModule.Data.NPCList) do
 				if nd.InternalQuestName and nd.Position then
+					if nd.InternalQuestName == "SkyExp1Quest" then
+						if nd.Position.Y > 3500 then
+							skyExp1UpperCF = CFrame.new(nd.Position)
+						else
+							skyExp1LowerCF = CFrame.new(nd.Position)
+						end
+					end
 					npcPosMap[nd.InternalQuestName] = CFrame.new(nd.Position)
 					hasGuide = true
 				end
@@ -2186,6 +2206,11 @@ do
 								for mName, cnt in pairs(qd.Task) do
 									if cnt > 1 and cnt <= 20 then
 										local npcCF = npcPosMap[qGroup]
+										if qGroup == "SkyExp1Quest" then
+											npcCF = (qIdx == 2)
+												and (skyExp1UpperCF or CFrame.new(-5949.07, 5467.94, 2086.52))
+												or (skyExp1LowerCF or CFrame.new(-4309.40, 1085.80, -556.29))
+										end
 										local sps = spMap[mName]
 										if not sps or #sps == 0 then
 											sps = {npcCF or CFrame.new(0, 60, 0)}
@@ -2533,15 +2558,19 @@ do
 			Lighting.ShadowSoftness = 0
 			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
 			for _, v in ipairs(Lighting:GetChildren()) do
-				if v:IsA("PostEffect") or v:IsA("Atmosphere") or v:IsA("Sky") then
-					if v:IsA("PostEffect") or v:IsA("Atmosphere") then
-						v.Enabled = false
-					end
+				if v:IsA("PostEffect") or v:IsA("Atmosphere") then
+					v.Enabled = false
 				end
 			end
-			for _, d in ipairs(Workspace:GetDescendants()) do
-				optimizeInstanceForFps(d)
-			end
+			task.spawn(function()
+				for idx, d in ipairs(Workspace:GetDescendants()) do
+					if not KX.fpsBoost then break end
+					pcall(optimizeInstanceForFps, d)
+					if idx % 600 == 0 then
+						task.wait()
+					end
+				end
+			end)
 			if not fpsDescendantConn then
 				fpsDescendantConn = connect(Workspace.DescendantAdded, function(d)
 					if KX.fpsBoost then
@@ -2924,49 +2953,27 @@ do
 		["Shanda"] = true,
 		["Royal Squad"] = true,
 		["Royal Soldier"] = true,
-		["Wysper"] = true,
 	}
 
-	-- Verified live Sea 1 Upper Skylands (SkyArea2) coordinates (Y ~ 5468 - 5552, Z ~ +963 to +1956)
-	local SEA1_UPPER_SKY_FALLBACK_PATROL = {
-		CFrame.new(-5890.41, 5468.90, 1956.19), -- Shanda [Lv. 475] (Main cluster)
-		CFrame.new(-6706.87, 5551.41, 1155.43), -- Royal Squad [Lv. 525]
-		CFrame.new(-6938.38, 5541.05, 963.78),  -- Royal Soldier [Lv. 550]
+	local SEA1_LOWER_SKY_MOBS_SET = {
+		["Sky Bandit"] = true,
+		["Dark Master"] = true,
 	}
-
-	local skyPatrolIdx = 1
-	local lastSkyPatrolClock = 0
-
-	local function getUpperSkyPatrolPoints()
-		local spMap = KX.getSpawnMap()
-		local pts = {}
-		for _, mName in ipairs({"Shanda", "Royal Squad", "Royal Soldier"}) do
-			local list = spMap and spMap[mName]
-			if list and #list > 0 then
-				for _, cf in ipairs(list) do
-					if cf.Position.Y > 3500 then
-						table.insert(pts, cf)
-						break
-					end
-				end
-			end
-		end
-		if #pts == 0 then
-			return SEA1_UPPER_SKY_FALLBACK_PATROL
-		end
-		return pts
-	end
 
 	function KX.getSea1SkyOrFountainQuestInfo()
 		local spMap = KX.getSpawnMap()
 		local npcPosMap = {}
+		local skyExp1LowerCF = nil
+		local skyExp1UpperCF = nil
 		if GuideModule and GuideModule.Data and GuideModule.Data.NPCList then
 			for _, nd in pairs(GuideModule.Data.NPCList) do
 				if nd.InternalQuestName and nd.Position then
-					-- SkyExp1Quest has 2 Mole NPCs (Y=1085 in Lower Cloud vs Y=5468 in Upper SkyArea2); always prefer Upper SkyArea2!
+					-- SkyExp1Quest has 2 Mole NPCs: Y=1085.8 in Lower Skylands (God's Guard) vs Y=5467.9 in Upper SkyArea2 (Shanda)
 					if nd.InternalQuestName == "SkyExp1Quest" then
-						if nd.Position.Y > 3500 or not npcPosMap["SkyExp1Quest"] then
-							npcPosMap["SkyExp1Quest"] = CFrame.new(nd.Position)
+						if nd.Position.Y > 3500 then
+							skyExp1UpperCF = CFrame.new(nd.Position)
+						else
+							skyExp1LowerCF = CFrame.new(nd.Position)
 						end
 					else
 						npcPosMap[nd.InternalQuestName] = CFrame.new(nd.Position)
@@ -3009,8 +3016,18 @@ do
 			local sps = spMap[mName]
 			if not sps or #sps == 0 then
 				sps = isSoldier
-					and {CFrame.new(-6938.38, 5541.05, 963.78)}
-					or {CFrame.new(-6706.87, 5551.41, 1155.43)}
+					and {
+						CFrame.new(-6938.38, 5541.05, 963.78),
+						CFrame.new(-7138.48, 5541.05, 1050.77),
+						CFrame.new(-7137.43, 5541.05, 892.99),
+						CFrame.new(-6932.09, 5541.05, 842.44),
+					}
+					or {
+						CFrame.new(-6706.87, 5551.41, 1155.43),
+						CFrame.new(-6690.04, 5551.41, 1318.31),
+						CFrame.new(-6868.94, 5554.89, 1319.95),
+						CFrame.new(-6804.69, 5550.37, 1083.56),
+					}
 			end
 			return {
 				questGroup = "SkyExp2Quest",
@@ -3025,14 +3042,72 @@ do
 			local mName = "Shanda"
 			local qIdx = 2
 			local lReq = 475
-			local npcCF = (npcPosMap["SkyExp1Quest"] and npcPosMap["SkyExp1Quest"].Position.Y > 3500 and npcPosMap["SkyExp1Quest"])
-				or CFrame.new(-5949.07, 5467.94, 2086.52)
+			local npcCF = skyExp1UpperCF or CFrame.new(-5949.07, 5467.94, 2086.52)
 			local sps = spMap[mName]
 			if not sps or #sps == 0 then
-				sps = {CFrame.new(-5890.41, 5468.90, 1956.19)}
+				sps = {
+					CFrame.new(-5890.41, 5468.90, 1956.19),
+					CFrame.new(-5878.79, 5470.44, 1864.20),
+					CFrame.new(-6026.84, 5469.55, 1851.05),
+					CFrame.new(-6040.20, 5468.01, 1734.21),
+				}
 			end
 			return {
 				questGroup = "SkyExp1Quest",
+				questIndex = qIdx,
+				levelReq = lReq,
+				mobName = mName,
+				spawns = sps,
+				npcCFrame = npcCF,
+			}
+		elseif lvl >= 450 then
+			-- Middle Skylands Cloud (SkyExp1Quest idx 1: God's Guard Lv. 450 right next to Mole on Lower Sky!)
+			local mName = "God's Guard"
+			local qIdx = 1
+			local lReq = 450
+			local npcCF = skyExp1LowerCF or CFrame.new(-4309.40, 1085.80, -556.29)
+			local sps = spMap[mName]
+			if not sps or #sps == 0 then
+				sps = {
+					CFrame.new(-4227.25, 1087.96, -567.61),
+					CFrame.new(-4403.33, 1088.22, -498.13),
+					CFrame.new(-4364.76, 1090.17, -383.48),
+					CFrame.new(-4234.56, 1089.33, -267.38),
+				}
+			end
+			return {
+				questGroup = "SkyExp1Quest",
+				questIndex = qIdx,
+				levelReq = lReq,
+				mobName = mName,
+				spawns = sps,
+				npcCFrame = npcCF,
+			}
+		elseif lvl >= 150 then
+			-- Skylands (SkyQuest: Sky Bandit Lv. 150 / Dark Master Lv. 175 at Sky Adventurer!)
+			local isDarkMaster = (lvl >= 175)
+			local mName = isDarkMaster and "Dark Master" or "Sky Bandit"
+			local qIdx = isDarkMaster and 2 or 1
+			local lReq = isDarkMaster and 175 or 150
+			local npcCF = npcPosMap["SkyQuest"] or CFrame.new(-5406.29, 410.11, -694.04)
+			local sps = spMap[mName]
+			if not sps or #sps == 0 then
+				sps = isDarkMaster
+					and {
+						CFrame.new(-5206.77, 504.74, -348.46),
+						CFrame.new(-5269.01, 504.98, -461.12),
+						CFrame.new(-5411.25, 504.93, -372.78),
+						CFrame.new(-5283.17, 505.06, -221.01),
+					}
+					or {
+						CFrame.new(-5014.03, 280.72, -972.08),
+						CFrame.new(-5157.07, 280.72, -916.72),
+						CFrame.new(-5221.64, 280.72, -1068.64),
+						CFrame.new(-4973.74, 280.72, -1119.43),
+					}
+			end
+			return {
+				questGroup = "SkyQuest",
 				questIndex = qIdx,
 				levelReq = lReq,
 				mobName = mName,
@@ -3046,11 +3121,11 @@ do
 	function KX.stepSea1SkyAndFountainFarm(hrp, customLabel)
 		local lvl = tonumber(KX.level) or 1
 
-		-- 1) Quick Starter Warmup (Lv. 1 - 9) before teleporting to Upper Skylands
-		if lvl < 10 then
+		-- 1) Lv. 1 - 149 -> Accept highest unlocked Sea 1 mission until SkyQuest (Lv. 150) unlocks
+		if lvl < 150 then
 			local qInfo = KX.getBestLevelQuest()
 			if qInfo and KX.ensureQuestAccepted(qInfo, hrp) then
-				KX.farmMobSpawns(qInfo.mobName, qInfo.spawns, customLabel or ("⚔️ Sea 1 Warmup [Lv." .. tostring(lvl) .. "]"), "Melee")
+				KX.farmMobSpawns(qInfo.mobName, qInfo.spawns, customLabel or ("⚔️ Sea 1 Misión [Lv." .. tostring(lvl) .. " • " .. tostring(qInfo.mobName) .. "]"), "Melee")
 			end
 			return
 		end
@@ -3065,18 +3140,18 @@ do
 			return
 		end
 
-		-- 3) Lv. 475 - 624 -> Upper Skylands High-Level NPCs + Sky Mission ("los del cielo y tome la misión")
-		if lvl >= 475 then
-			local skyQuest = KX.getSea1SkyOrFountainQuestInfo()
-			if skyQuest and KX.ensureQuestAccepted(skyQuest, hrp) then
-				local lbl = customLabel or string.format("☁️ Sea 1 Cielo + Misión [Lv.%d • %s]", lvl, skyQuest.mobName)
-				local targetSet = {[skyQuest.mobName] = true}
-				local qEnemy = KX.findNearestAliveFromSet(targetSet)
-				if qEnemy then
-					KX.engageTarget(qEnemy, targetSet, lbl, "Melee")
-					return
-				end
-				-- While quest mob wave is respawning, clear any other alive Upper Skylands cluster for bonus XP!
+		-- 3) Lv. 150 - 624 -> Skylands NPCs + Sky Mission (SkyQuest -> SkyExp1Quest -> SkyExp2Quest)
+		local skyQuest = KX.getSea1SkyOrFountainQuestInfo()
+		if skyQuest and KX.ensureQuestAccepted(skyQuest, hrp) then
+			local lbl = customLabel or string.format("☁️ Sea 1 Cielo + Misión [Lv.%d • %s]", lvl, skyQuest.mobName)
+			local targetSet = {[skyQuest.mobName] = true}
+			local qEnemy = KX.findNearestAliveFromSet(targetSet)
+			if qEnemy then
+				KX.engageTarget(qEnemy, targetSet, lbl, "Melee")
+				return
+			end
+			-- While quest mob wave is respawning, clear nearby alive Sky cluster on the same Sky layer for bonus XP!
+			if lvl >= 475 then
 				local bonusSkyMob = KX.findNearestAliveFromSet(SEA1_UPPER_SKY_MOBS_SET)
 				if bonusSkyMob then
 					local bRoot = KX.getModelRoot(bonusSkyMob)
@@ -3085,58 +3160,17 @@ do
 						return
 					end
 				end
-				KX.farmMobSpawns(skyQuest.mobName, skyQuest.spawns, lbl, "Melee")
-			end
-			return
-		end
-
-		-- 4) Lv. 10 - 474 -> Upper Skylands (SkyArea2) High-Level Sky NPC Power-Farm (Shanda / Royal Squad / Royal Soldier)
-		local hasOldQ = KX.getActiveQuestInfo(nil, nil)
-		if hasOldQ and CommF_ and (os.clock() - lastAbandonClock >= 2.0) then
-			lastAbandonClock = os.clock()
-			pcall(function() CommF_:InvokeServer("AbandonQuest") end)
-		end
-
-		local lbl = customLabel or string.format("☁️ Sea 1 Power-Farm Cielo [Lv.%d -> 475]", lvl)
-
-		-- Prioritize Shanda [Lv. 475] & Royal Squad [Lv. 525] in Upper Skylands (Y > 3500)
-		local bestSkyMob = nil
-		local bestDist = math.huge
-		local enemies = Workspace:FindFirstChild("Enemies")
-		if enemies then
-			for _, m in ipairs(enemies:GetChildren()) do
-				if m:IsA("Model") and SEA1_UPPER_SKY_MOBS_SET[m.Name] and KX.isModelAlive(m) then
-					local p = KX.getModelRoot(m)
-					if p and p.Position.Y > 3500 then
-						local d = (p.Position - hrp.Position).Magnitude
-						if m.Name == "Shanda" then d = d * 0.7 end
-						if d < bestDist then
-							bestDist = d
-							bestSkyMob = m
-						end
+			elseif lvl >= 150 and lvl < 450 then
+				local bonusLowSkyMob = KX.findNearestAliveFromSet(SEA1_LOWER_SKY_MOBS_SET)
+				if bonusLowSkyMob then
+					local bRoot = KX.getModelRoot(bonusLowSkyMob)
+					if bRoot and bRoot.Position.Y < 2000 then
+						KX.engageTarget(bonusLowSkyMob, SEA1_LOWER_SKY_MOBS_SET, lbl .. " (Bonus XP)", "Melee")
+						return
 					end
 				end
 			end
-		end
-
-		if bestSkyMob then
-			KX.engageTarget(bestSkyMob, {[bestSkyMob.Name] = true}, lbl, "Melee")
-			return
-		end
-
-		local patrolList = getUpperSkyPatrolPoints()
-		local sp = patrolList[((skyPatrolIdx - 1) % #patrolList) + 1]
-		local hoverCF = sp * CFrame.new(0, 20, 0)
-		setStatus(lbl .. " (Viajando al Cielo / Esperando oleada...)", KX.phaseText)
-		local reached = KX.moveToCFrame(hoverCF)
-		if reached or (hrp.Position - hoverCF.Position).Magnitude <= 35 then
-			if os.clock() - lastSkyPatrolClock >= 2.8 then
-				lastSkyPatrolClock = os.clock()
-				skyPatrolIdx = (skyPatrolIdx % #patrolList) + 1
-			end
-		else
-			-- Lock destination while in transit so tween NEVER cancels or oscillates inside the clouds!
-			lastSkyPatrolClock = os.clock()
+			KX.farmMobSpawns(skyQuest.mobName, skyQuest.spawns, lbl, "Melee")
 		end
 	end
 
