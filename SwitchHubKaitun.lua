@@ -55,12 +55,65 @@ do
 	for _, container in ipairs({CoreGui, hui}) do
 		if container then
 			for _, ch in ipairs(container:GetChildren()) do
-				if ch.Name == "SwitchHub_SeriesX_Kaitun" or ch.Name == "SwitchHub_SeriesX_AFK" then
+				if ch.Name == "SwitchHub_SeriesX_Kaitun" or ch.Name == "SwitchHub_SeriesX_AFK" or (ch.Name:find("4") and ch.Name:find("H")) then
 					pcall(function() ch:Destroy() end)
 				end
 			end
 		end
 	end
+
+	-- Neutralize any competing third-party farm loops (e.g. Hoho Hub / EffectsSY) so Kaitun has exclusive CFrame control
+	pcall(function()
+		_G.TickScriptActive = 0
+		_G.NeedRestart = true
+		if getconnections then
+			for _, c in ipairs(getconnections(RunService.Stepped)) do
+				local fn = c.Function
+				if fn and debug and debug.info then
+					local s, l = debug.info(fn, "sl")
+					if s == "loadstring" and l == 1 then
+						pcall(function() c:Disable() end)
+						pcall(function() c:Disconnect() end)
+					end
+				end
+			end
+		end
+		if filtergc then
+			local CompetingKeys = {
+				AutoTrickOrTreat = true, AutoPumpkinHunt = true, AutoCollectHalloweenCandy = true,
+				AutoHellfireBoss = true, AutoEscapeHellfireChain = true, AutoSpookyGacha = true,
+				SuperFastAttack = true, AutoClick = true, BringMobV2 = true, AutoStoreFruit = true,
+				AutoBuso = true, AutoRaceAwakeAbility = true, AutoFarmLevel = true, KaitunEnabled = true,
+				AutoConfigFarmFruitMastery = true, AutoFarmLevelGetQuest = true,
+			}
+			local safeMeta = {
+				__index = function(_, k)
+					if rawget(CompetingKeys, k) then return false end
+					return nil
+				end,
+				__newindex = function(self, k, v)
+					if not rawget(CompetingKeys, k) then
+						rawset(self, k, v)
+					end
+				end,
+			}
+			local tbls = filtergc("table", { Keys = {"HoHoV4Theme", "HoHoTopbarEnable"} })
+			for _, t in ipairs(tbls or {}) do
+				if t ~= CompetingKeys and rawget(t, "HoHoV4Theme") ~= nil then
+					pcall(function() setmetatable(t, nil) end)
+					for k in pairs(CompetingKeys) do
+						pcall(function() rawset(t, k, nil) end)
+					end
+					pcall(function() setmetatable(t, safeMeta) end)
+				end
+			end
+		end
+		local hrp = LocalPlayer and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local eff = hrp:FindFirstChild("EffectsSY")
+			if eff then pcall(function() eff:Destroy() end) end
+		end
+	end)
 end
 
 local KX = {
@@ -782,36 +835,61 @@ do
 		end
 	end
 
+	local lastHud2xPollClock = 0
+	local cachedHud2xSec = 0
+
 	local function parseHud2xExpSeconds()
+		if os.clock() - lastHud2xPollClock < 2.5 then
+			return cachedHud2xSec
+		end
+		lastHud2xPollClock = os.clock()
 		local pgui = LocalPlayer:FindFirstChild("PlayerGui")
-		if not pgui then return 0 end
+		if not pgui then
+			cachedHud2xSec = 0
+			return 0
+		end
+		local function parseLabelSec(d)
+			if d and d:IsA("TextLabel") and d.Visible then
+				local txt = d.Text or ""
+				local low = txt:lower()
+				if low:find("2x exp") or low:find("x2 exp") or low:find("exp boost") or low:find("double exp") then
+					local h, m, s = txt:match("(%d+)%s*:%s*(%d+)%s*:%s*(%d+)")
+					if h and m and s then
+						return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+					end
+					local m2, s2 = txt:match("(%d+)%s*:%s*(%d+)")
+					if m2 and s2 then
+						return tonumber(m2) * 60 + tonumber(s2)
+					end
+					local mins = low:match("(%d+)%s*m")
+					local secs = low:match("(%d+)%s*s")
+					if mins or secs then
+						return (tonumber(mins) or 0) * 60 + (tonumber(secs) or 0)
+					end
+					return 60
+				end
+			end
+			return nil
+		end
 		for _, gName in ipairs({"Main", "Main (minimal)", "HUDRoot"}) do
 			local g = pgui:FindFirstChild(gName)
 			if g then
-				for _, d in ipairs(g:GetDescendants()) do
-					if d:IsA("TextLabel") and d.Visible then
-						local txt = d.Text or ""
-						local low = txt:lower()
-						if low:find("2x exp") or low:find("x2 exp") or low:find("exp boost") or low:find("double exp") then
-							local h, m, s = txt:match("(%d+)%s*:%s*(%d+)%s*:%s*(%d+)")
-							if h and m and s then
-								return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+				local thl = g:FindFirstChild("TopHUDList")
+				for _, container in ipairs({thl, g}) do
+					if container then
+						for _, c1 in ipairs(container:GetChildren()) do
+							local r1 = parseLabelSec(c1)
+							if r1 then cachedHud2xSec = r1; return r1 end
+							for _, c2 in ipairs(c1:GetChildren()) do
+								local r2 = parseLabelSec(c2)
+								if r2 then cachedHud2xSec = r2; return r2 end
 							end
-							local m2, s2 = txt:match("(%d+)%s*:%s*(%d+)")
-							if m2 and s2 then
-								return tonumber(m2) * 60 + tonumber(s2)
-							end
-							local mins = low:match("(%d+)%s*m")
-							local secs = low:match("(%d+)%s*s")
-							if mins or secs then
-								return (tonumber(mins) or 0) * 60 + (tonumber(secs) or 0)
-							end
-							return 60
 						end
 					end
 				end
 			end
 		end
+		cachedHud2xSec = 0
 		return 0
 	end
 
@@ -846,6 +924,7 @@ do
 				end)
 				local msg = tostring(res or ""):lower()
 				task.wait(1.0)
+				lastHud2xPollClock = 0
 				local afterSec = KX.getRemaining2xExpSeconds()
 
 				if afterSec > 0 or (ok and (msg:find("success") or msg:find("2x") or msg:find("exp") or msg:find("minute") or msg:find("redeem")) and not msg:find("already") and not msg:find("invalid") and not msg:find("expired")) then
@@ -863,6 +942,9 @@ do
 	end
 
 	local lastInvScanClock = 0
+	local lastStyleOwnershipCheckClock = 0
+	local ITEM_ID_META_CACHE = {}
+
 	KX.scanPlayerState = function(forceNow)
 		KX.worldNum = getCurrentSeaNumber()
 		KX.maxLevel = tonumber(LocalPlayer:GetAttribute("LevelCap")) or 2800
@@ -884,7 +966,7 @@ do
 		if isChooseTeamScreenOpen() or not CommF_ then
 			return
 		end
-		if not forceNow and (os.clock() - lastInvScanClock < 4.0) then
+		if not forceNow and (os.clock() - lastInvScanClock < 8.0) then
 			return
 		end
 		lastInvScanClock = os.clock()
@@ -936,18 +1018,6 @@ do
 		end
 
 		pcall(function()
-			local inv = CommF_:InvokeServer("getInventory")
-			if type(inv) == "table" and #inv > 0 then
-				sawAnyInventorySource = true
-				for _, item in ipairs(inv) do
-					if type(item) == "table" then
-						ingestInventoryEntry(item.Name, item.Type, item.Count, item.Mastery or item.Level)
-					end
-				end
-			end
-		end)
-
-		pcall(function()
 			local gw = CommF_:InvokeServer("getInventoryWeapons")
 			if type(gw) == "table" and #gw > 0 then
 				for _, item in ipairs(gw) do
@@ -983,13 +1053,22 @@ do
 					sawAnyInventorySource = true
 					for _, tile in pairs(tiles) do
 						if type(tile) == "table" and tile.ItemId then
-							local okD, data = pcall(function() return idMod.getDataFromId(tile.ItemId):unwrap() end)
-							if okD and type(data) == "table" then
-								local tp = tostring(data.Type or "")
-								local sk = tostring(data.StorageKey or data.Name or data.DisplayName or "")
+							local meta = ITEM_ID_META_CACHE[tile.ItemId]
+							if not meta then
+								local okD, data = pcall(function() return idMod.getDataFromId(tile.ItemId):unwrap() end)
+								if okD and type(data) == "table" then
+									meta = {
+										tp = tostring(data.Type or ""),
+										sk = tostring(data.StorageKey or data.Name or data.DisplayName or ""),
+										mast = tonumber(data.Mastery) or 0,
+									}
+									ITEM_ID_META_CACHE[tile.ItemId] = meta
+								end
+							end
+							if meta then
 								local cnt = tonumber(tile.Count or tile.Quantity or tile.Amount) or 1
-								local mast = tonumber(tile.Mastery or data.Mastery) or 0
-								ingestInventoryEntry(sk, tp, cnt, mast)
+								local mast = tonumber(tile.Mastery) or meta.mast or 0
+								ingestInventoryEntry(meta.sk, meta.tp, cnt, mast)
 							end
 						end
 					end
@@ -1021,66 +1100,69 @@ do
 			KX.questsDone.ripIndraSea2 = true
 		end
 
-		-- Awakened moves summary
-		pcall(function()
-			local awk = CommF_:InvokeServer("Awakener", "Check")
-			if type(awk) == "table" and awk.AwakenedMoves then
-				local moves = {}
-				for mv, okAwk in pairs(awk.AwakenedMoves) do
-					if okAwk then table.insert(moves, tostring(mv)) end
-				end
-				table.sort(moves)
-				KX.awakenedText = (#moves > 0) and table.concat(moves, " ") or "-"
-			end
-		end)
-
-		-- Elite Hunter progress in Sea 3
-		if KX.worldNum == 3 then
+		if forceNow or (os.clock() - lastStyleOwnershipCheckClock >= 25.0) then
+			lastStyleOwnershipCheckClock = os.clock()
+			-- Awakened moves summary
 			pcall(function()
-				local ep = CommF_:InvokeServer("EliteHunter", "Progress")
-				if tonumber(ep) then
-					KX.eliteProgress = tonumber(ep)
+				local awk = CommF_:InvokeServer("Awakener", "Check")
+				if type(awk) == "table" and awk.AwakenedMoves then
+					local moves = {}
+					for mv, okAwk in pairs(awk.AwakenedMoves) do
+						if okAwk then table.insert(moves, tostring(mv)) end
+					end
+					table.sort(moves)
+					KX.awakenedText = (#moves > 0) and table.concat(moves, " ") or "-"
+				end
+			end)
+
+			-- Elite Hunter progress in Sea 3
+			if KX.worldNum == 3 then
+				pcall(function()
+					local ep = CommF_:InvokeServer("EliteHunter", "Progress")
+					if tonumber(ep) then
+						KX.eliteProgress = tonumber(ep)
+					end
+				end)
+			end
+
+			-- Fighting style ownership queries (non-buying check argument = true)
+			pcall(function()
+				if not KX.ownedMelees["Dark Step"] and CommF_:InvokeServer("BuyBlackLeg", true) == 1 then
+					KX.ownedMelees["Dark Step"] = true
+				end
+				if not KX.ownedMelees["Electro"] and CommF_:InvokeServer("BuyElectro", true) == 1 then
+					KX.ownedMelees["Electro"] = true
+				end
+				if not KX.ownedMelees["Water Kung Fu"] and CommF_:InvokeServer("BuyFishmanKarate", true) == 1 then
+					KX.ownedMelees["Water Kung Fu"] = true
+				end
+				if not KX.ownedMelees["Superhuman"] and CommF_:InvokeServer("BuySuperhuman", true) == 1 then
+					KX.ownedMelees["Superhuman"] = true
+				end
+				if not KX.ownedMelees["Death Step"] and CommF_:InvokeServer("BuyDeathStep", true) == 1 then
+					KX.ownedMelees["Death Step"] = true
+					KX.questsDone.deathStep = true
+				end
+				if not KX.ownedMelees["Sharkman Karate"] and CommF_:InvokeServer("BuySharkmanKarate", true) == 1 then
+					KX.ownedMelees["Sharkman Karate"] = true
+					KX.questsDone.sharkmanKarate = true
+				end
+				if not KX.ownedMelees["Electric Claw"] and CommF_:InvokeServer("BuyElectricClaw", true) == 1 then
+					KX.ownedMelees["Electric Claw"] = true
+					KX.questsDone.electricClaw = true
+				end
+				if not KX.ownedMelees["Dragon Talon"] and CommF_:InvokeServer("BuyDragonTalon", true) == 1 then
+					KX.ownedMelees["Dragon Talon"] = true
+					KX.questsDone.dragonTalon = true
+				end
+				if not KX.ownedMelees["Godhuman"] and CommF_:InvokeServer("BuyGodhuman", true) == 1 then
+					KX.ownedMelees["Godhuman"] = true
+				end
+				if not KX.ownedMelees["Sanguine Art"] and CommF_:InvokeServer("BuySanguineArt", true) == 1 then
+					KX.ownedMelees["Sanguine Art"] = true
 				end
 			end)
 		end
-
-		-- Fighting style ownership queries (non-buying check argument = true)
-		pcall(function()
-			if not KX.ownedMelees["Dark Step"] and CommF_:InvokeServer("BuyBlackLeg", true) == 1 then
-				KX.ownedMelees["Dark Step"] = true
-			end
-			if not KX.ownedMelees["Electro"] and CommF_:InvokeServer("BuyElectro", true) == 1 then
-				KX.ownedMelees["Electro"] = true
-			end
-			if not KX.ownedMelees["Water Kung Fu"] and CommF_:InvokeServer("BuyFishmanKarate", true) == 1 then
-				KX.ownedMelees["Water Kung Fu"] = true
-			end
-			if not KX.ownedMelees["Superhuman"] and CommF_:InvokeServer("BuySuperhuman", true) == 1 then
-				KX.ownedMelees["Superhuman"] = true
-			end
-			if not KX.ownedMelees["Death Step"] and CommF_:InvokeServer("BuyDeathStep", true) == 1 then
-				KX.ownedMelees["Death Step"] = true
-				KX.questsDone.deathStep = true
-			end
-			if not KX.ownedMelees["Sharkman Karate"] and CommF_:InvokeServer("BuySharkmanKarate", true) == 1 then
-				KX.ownedMelees["Sharkman Karate"] = true
-				KX.questsDone.sharkmanKarate = true
-			end
-			if not KX.ownedMelees["Electric Claw"] and CommF_:InvokeServer("BuyElectricClaw", true) == 1 then
-				KX.ownedMelees["Electric Claw"] = true
-				KX.questsDone.electricClaw = true
-			end
-			if not KX.ownedMelees["Dragon Talon"] and CommF_:InvokeServer("BuyDragonTalon", true) == 1 then
-				KX.ownedMelees["Dragon Talon"] = true
-				KX.questsDone.dragonTalon = true
-			end
-			if not KX.ownedMelees["Godhuman"] and CommF_:InvokeServer("BuyGodhuman", true) == 1 then
-				KX.ownedMelees["Godhuman"] = true
-			end
-			if not KX.ownedMelees["Sanguine Art"] and CommF_:InvokeServer("BuySanguineArt", true) == 1 then
-				KX.ownedMelees["Sanguine Art"] = true
-			end
-		end)
 
 		-- Sea 2 Bartilo, Don Swan & Rip Indra quest status
 		if KX.worldNum == 2 then
@@ -1271,6 +1353,34 @@ do
 		end
 	end
 
+	local portalFailCooldown = {}
+
+	function KX.invokeRequestEntrance(destVec)
+		if not CommF_ or not destVec then return false end
+		local key = string.format("%.0f,%.0f,%.0f", destVec.X, destVec.Y, destVec.Z)
+		local cdUntil = portalFailCooldown[key]
+		if cdUntil and os.clock() < cdUntil then
+			return false
+		end
+		local ch = LocalPlayer.Character
+		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		if not hrp then return false end
+		local okE, v1 = pcall(function()
+			return CommF_:InvokeServer("requestEntrance", destVec)
+		end)
+		if okE and typeof(v1) == "Vector3" and LocalPlayer.Character == ch and hrp.Parent then
+			KX.stopTween()
+			KX.ensureAntiFall(hrp)
+			hrp.CFrame = CFrame.new(v1)
+			return true
+		elseif hrp.Parent and (hrp.Position - destVec).Magnitude <= 140 then
+			KX.stopTween()
+			return true
+		end
+		portalFailCooldown[key] = os.clock() + 90.0
+		return false
+	end
+
 	function KX.tryRequestPortalEntrance(destVec, touchPart)
 		local hrp = KX.getRootAndHum()
 		if hrp and touchPart and touchPart:IsA("BasePart") and firetouchinterest then
@@ -1281,10 +1391,7 @@ do
 		end
 		if CommF_ and destVec and (os.clock() - lastPortalClock >= 2.2) then
 			lastPortalClock = os.clock()
-			KX.stopTween()
-			pcall(function()
-				CommF_:InvokeServer("requestEntrance", destVec)
-			end)
+			KX.invokeRequestEntrance(destVec)
 		end
 	end
 
@@ -1333,11 +1440,11 @@ do
 				if targetInShip and not playerInShip then
 					if CommF_ and (os.clock() - lastPortalClock >= 3.2) then
 						lastPortalClock = os.clock()
-						KX.stopTween()
-						pcall(function() CommF_:InvokeServer("requestEntrance", CURSED_SHIP_INSIDE) end)
-						task.wait(0.2)
-						hrp = KX.getRootAndHum()
-						if not hrp then return false end
+						if KX.invokeRequestEntrance(CURSED_SHIP_INSIDE) then
+							task.wait(0.15)
+							hrp = KX.getRootAndHum()
+							if not hrp then return false end
+						end
 					end
 					if not KX.isPosInCursedShip(hrp.Position) then
 						targetPos = CURSED_SHIP_OUTSIDE
@@ -1345,11 +1452,11 @@ do
 				elseif playerInShip and not targetInShip then
 					if CommF_ and (os.clock() - lastPortalClock >= 3.2) then
 						lastPortalClock = os.clock()
-						KX.stopTween()
-						pcall(function() CommF_:InvokeServer("requestEntrance", CURSED_SHIP_OUTSIDE) end)
-						task.wait(0.2)
-						hrp = KX.getRootAndHum()
-						if not hrp then return false end
+						if KX.invokeRequestEntrance(CURSED_SHIP_OUTSIDE) then
+							task.wait(0.15)
+							hrp = KX.getRootAndHum()
+							if not hrp then return false end
+						end
 					end
 				end
 			end
@@ -1378,25 +1485,25 @@ do
 			local bestPortal = nil
 			local bestRemDist = dist - 2200
 			for _, pPos in ipairs(portals) do
+				local key = string.format("%.0f,%.0f,%.0f", pPos.X, pPos.Y, pPos.Z)
+				local cdUntil = portalFailCooldown[key]
 				local rem = (pPos - targetPos).Magnitude
-				if rem < bestRemDist and (hrp.Position - pPos).Magnitude > 450 then
+				if (not cdUntil or os.clock() >= cdUntil) and rem < bestRemDist and (hrp.Position - pPos).Magnitude > 450 then
 					bestRemDist = rem
 					bestPortal = pPos
 				end
 			end
 			if bestPortal then
 				lastPortalClock = os.clock()
-				KX.stopTween()
-				pcall(function()
-					CommF_:InvokeServer("requestEntrance", bestPortal)
-				end)
-				task.wait(0.25)
-				hrp = KX.getRootAndHum()
-				if not hrp then return false end
-				dist = (hrp.Position - targetPos).Magnitude
-				if dist <= 20 and targetPos == targetCF.Position then
-					hrp.CFrame = targetCF
-					return true
+				if KX.invokeRequestEntrance(bestPortal) then
+					task.wait(0.15)
+					hrp = KX.getRootAndHum()
+					if not hrp then return false end
+					dist = (hrp.Position - targetPos).Magnitude
+					if dist <= 20 and targetPos == targetCF.Position then
+						hrp.CFrame = targetCF
+						return true
+					end
 				end
 			end
 		end
@@ -1769,14 +1876,15 @@ do
 				if tool then tool:Activate() end
 			end)
 		else
-			-- Melee / Sword: When noAttackAnimation is ON, send direct server combo hits
-			-- so client swing animations, camera shake & forward lunge never trigger!
-			if not KX.noAttackAnimation then
-				pcall(function()
-					if CombatController and type(CombatController.Attack) == "function" and tool then
-						CombatController:Attack(tool, FakeInput)
-					end
-				end)
+			-- Melee / Sword: Call CombatController:Attack for authenticated server hits,
+			-- and immediately stop animation tracks when noAttackAnimation is ON!
+			pcall(function()
+				if CombatController and type(CombatController.Attack) == "function" and tool then
+					CombatController:Attack(tool, FakeInput)
+				end
+			end)
+			if KX.noAttackAnimation then
+				KX.suppressHitAnimations(hum)
 			end
 
 			pcall(function()
@@ -2718,13 +2826,13 @@ do
 		return orig, RAID_FRUIT_PRICE_MAP[orig]
 	end
 
-	function KX.findRaidIslandPart(islandNum, refPos)
+	function KX.findRaidIslandPart(islandNum, refPos, maxDist)
 		local wo = Workspace:FindFirstChild("_WorldOrigin")
 		local locs = wo and wo:FindFirstChild("Locations")
 		if not locs or not refPos then return nil, math.huge end
 		local targetName = "Island " .. tostring(islandNum)
 		local bestPart = nil
-		local bestDist = 4800
+		local bestDist = maxDist or 2200
 		for _, l in ipairs(locs:GetChildren()) do
 			if l:IsA("BasePart") and l.Name == targetName then
 				local d = (l.Position - refPos).Magnitude
@@ -2965,7 +3073,15 @@ do
 			if not KX.wasInRaid then
 				KX.wasInRaid = true
 				raidEnteredAt = os.clock()
-				KX.raidIslandIdx = 1
+				local startIsl, startDist = 1, 950
+				for k = 1, 5 do
+					local p, d = KX.findRaidIslandPart(k, hrp.Position, 950)
+					if p and d < startDist then
+						startDist = d
+						startIsl = k
+					end
+				end
+				KX.raidIslandIdx = startIsl
 				islandClearClock = 0
 				summonArriveClock = 0
 				raidChipFailCount = 0
@@ -2992,11 +3108,16 @@ do
 			if mob then
 				local mRoot = KX.getModelRoot(mob)
 				if mRoot and (mRoot.Position - hrp.Position).Magnitude <= 2600 then
+					local bestMobIsl, bestMobIslDist = nil, 850
 					for k = 1, 5 do
 						local iPart, iDist = KX.findRaidIslandPart(k, mRoot.Position)
-						if iPart and iDist < 900 and k > (KX.raidIslandIdx or 1) then
-							KX.raidIslandIdx = k
+						if iPart and iDist < bestMobIslDist then
+							bestMobIslDist = iDist
+							bestMobIsl = k
 						end
+					end
+					if bestMobIsl then
+						KX.raidIslandIdx = bestMobIsl
 					end
 					islandClearClock = 0
 					local curIsl = KX.raidIslandIdx or 1
@@ -3008,7 +3129,7 @@ do
 					-- Always attack with Fighting Style (Melee) so mastery & hits register cleanly
 					KX.engageTarget(
 						mob,
-						(not useKA) and nil or nil,
+						nil,
 						string.format("⚡ Raid %s [Isla %d/5 • %s]", raidChip, curIsl, modeTag),
 						"Melee"
 					)
@@ -3024,7 +3145,7 @@ do
 
 			-- No alive mobs on current island -> Advance to next Raid Island (1 -> 2 -> 3 -> 4 -> 5)!
 			if islandClearClock > 0
-				and (os.clock() - islandClearClock >= 3.2)
+				and (os.clock() - islandClearClock >= 4.8)
 				and (os.clock() - raidEnteredAt >= 5.0)
 				and (KX.raidIslandIdx or 1) < 5 then
 				local nextPart = KX.findRaidIslandPart((KX.raidIslandIdx or 1) + 1, hrp.Position)
@@ -3195,15 +3316,13 @@ do
 			or ((KX.worldNum == 2) and Vector3.new(-6528.17, 306.51, -4670.70) or Vector3.new(-5017.5, 314.8, -2825.4))
 
 		-- Fast Sea 3 Castle on the Sea portal shortcut if far from RaidSummon2
-		if KX.worldNum == 3 and (hrp.Position - btnPos).Magnitude > 1200 and CommF_ and (os.clock() - lastRaidPortalClock >= 3.5) then
+		if KX.worldNum == 3 and (hrp.Position - btnPos).Magnitude > 1200 and CommF_ and (os.clock() - lastRaidPortalClock >= 8.0) then
 			lastRaidPortalClock = os.clock()
-			KX.stopTween()
-			pcall(function()
-				CommF_:InvokeServer("requestEntrance", Vector3.new(-5075.5, 314.5, -3150.0))
-			end)
-			task.wait(0.25)
-			hrp, hum = KX.getRootAndHum()
-			if not hrp or not hum then return true end
+			if KX.invokeRequestEntrance(Vector3.new(-5075.5, 314.5, -3150.0)) then
+				task.wait(0.15)
+				hrp, hum = KX.getRootAndHum()
+				if not hrp or not hum then return true end
+			end
 		end
 
 		setStatus(string.format("⚡ Auto Raid [%s]: Activando cápsula de Raid...", raidChip), KX.phaseText)
@@ -5685,7 +5804,7 @@ connect(RunService.Stepped, function()
 
 	-- NoClip, Hit Animation Suppression & Infinite Energy while Auto Farm is active
 	if KX.autoFarm and ch then
-		for _, p in ipairs(ch:GetDescendants()) do
+		for _, p in ipairs(ch:GetChildren()) do
 			if p:IsA("BasePart") and p.CanCollide then
 				p.CanCollide = false
 			end
