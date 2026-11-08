@@ -154,6 +154,7 @@ local KX = {
 	tweenSpeed = 185, -- Balanced anti-rubberband speed (165 Segura / 185 Moderada / 205 Rápida)
 	attackInterval = 0.042, -- Ultra Fast M1 cadence (~24 ticks/sec + multi-target burst)
 	bringMobs = true, -- High-frequency cluster Bring Mob (up to 10 mobs within 340 studs)
+	sea1SkyPriorityFarm = true, -- Sea 1 Only: Farm high-level Sky NPCs (+ Quest) until Lv. 625, then Fountain City (last island)
 	noAttackAnimation = true, -- Removes character M1 swing/hit animation & lunge
 	fpsBoost = false,
 	afkMode = false,
@@ -293,6 +294,7 @@ local function saveConfig()
 			tweenSpeed = KX.tweenSpeed,
 			attackInterval = KX.attackInterval,
 			bringMobs = KX.bringMobs,
+			sea1SkyPriorityFarm = KX.sea1SkyPriorityFarm,
 			noAttackAnimation = KX.noAttackAnimation,
 			fpsBoost = KX.fpsBoost,
 			afkMode = KX.afkMode,
@@ -342,6 +344,9 @@ local function loadConfig()
 		end
 		if type(decoded.bringMobs) == "boolean" then
 			KX.bringMobs = decoded.bringMobs
+		end
+		if type(decoded.sea1SkyPriorityFarm) == "boolean" then
+			KX.sea1SkyPriorityFarm = decoded.sea1SkyPriorityFarm
 		end
 		if type(decoded.noAttackAnimation) == "boolean" then
 			KX.noAttackAnimation = decoded.noAttackAnimation
@@ -1420,6 +1425,33 @@ do
 		end
 
 		local targetPos = targetCF.Position
+
+		-- Deterministic Sea 1 Upper Skylands (SkyArea2) instant portal routing
+		if KX.worldNum == 1 and CommF_ and (os.clock() - lastPortalClock >= 2.2) then
+			if targetPos.Y > 3500 and hrp.Position.Y < 3500 then
+				local map = Workspace:FindFirstChild("Map")
+				local sky2 = map and map:FindFirstChild("SkyArea2")
+				local entPt = sky2 and sky2:FindFirstChild("EntrancePoint")
+				local sky2Vec = (entPt and entPt:IsA("BasePart") and entPt.Position) or Vector3.new(-7894.6, 5547.1, -380.2)
+				lastPortalClock = os.clock()
+				if KX.invokeRequestEntrance(sky2Vec) then
+					task.wait(0.15)
+					hrp = KX.getRootAndHum()
+					if not hrp then return false end
+				end
+			elseif targetPos.Y < 2000 and hrp.Position.Y > 3500 then
+				local map = Workspace:FindFirstChild("Map")
+				local sky1 = map and map:FindFirstChild("Sky")
+				local exitPt = sky1 and sky1:FindFirstChild("ExitPoint")
+				local sky1Vec = (exitPt and exitPt:IsA("BasePart") and exitPt.Position) or Vector3.new(-4651.8, 845.2, -1912.6)
+				lastPortalClock = os.clock()
+				if KX.invokeRequestEntrance(sky1Vec) then
+					task.wait(0.15)
+					hrp = KX.getRootAndHum()
+					if not hrp then return false end
+				end
+			end
+		end
 
 		-- Deterministic Sea 2 interior portal routing (Don Swan Room & Cursed Ship)
 		if KX.worldNum == 2 then
@@ -2851,8 +2883,202 @@ do
 		end
 	end
 
+	local SEA1_UPPER_SKY_MOBS_SET = {
+		["Shanda"] = true,
+		["Royal Squad"] = true,
+		["Royal Soldier"] = true,
+		["God's Guard"] = true,
+	}
+
+	local SEA1_UPPER_SKY_PATROL = {
+		CFrame.new(-7685.0, 5565.0, -490.0),  -- Shanda [Lv. 475] (9 cluster spawns)
+		CFrame.new(-7640.0, 5606.0, -1440.0), -- Royal Squad [Lv. 525]
+		CFrame.new(-7830.0, 5606.0, -1725.0), -- Royal Soldier [Lv. 550]
+		CFrame.new(-7845.0, 5550.0, -440.0),  -- God's Guard [Lv. 450]
+	}
+
+	local skyPatrolIdx = 1
+	local lastSkyPatrolClock = 0
+
+	function KX.getSea1SkyOrFountainQuestInfo()
+		local spMap = KX.getSpawnMap()
+		local npcPosMap = {}
+		if GuideModule and GuideModule.Data and GuideModule.Data.NPCList then
+			for _, nd in pairs(GuideModule.Data.NPCList) do
+				if nd.InternalQuestName and nd.Position then
+					npcPosMap[nd.InternalQuestName] = CFrame.new(nd.Position)
+				end
+			end
+		end
+
+		local lvl = tonumber(KX.level) or 1
+		if lvl >= 625 then
+			-- Near the Last Island of Sea 1 (Fountain City) -> Farm normal FountainQuest!
+			local isCapt = (lvl >= 650)
+			local mName = isCapt and "Galley Captain" or "Galley Pirate"
+			local qIdx = isCapt and 2 or 1
+			local lReq = isCapt and 650 or 625
+			local npcCF = npcPosMap["FountainQuest"]
+				or CFrame.new(KX.getNPCWorldPos("Freezeburg Quest Giver", Vector3.new(5259.8, 38.5, 4050.1)))
+			local sps = spMap[mName]
+			if not sps or #sps == 0 then
+				sps = isCapt
+					and {CFrame.new(5670.0, 42.0, 4920.0), CFrame.new(5820.0, 42.0, 4850.0)}
+					or {CFrame.new(5550.0, 42.0, 3950.0), CFrame.new(5680.0, 42.0, 4020.0)}
+			end
+			return {
+				questGroup = "FountainQuest",
+				questIndex = qIdx,
+				levelReq = lReq,
+				mobName = mName,
+				spawns = sps,
+				npcCFrame = npcCF,
+			}
+		elseif lvl >= 525 then
+			-- Upper Skylands City of Gold (SkyExp2Quest: Royal Squad Lv. 525 / Royal Soldier Lv. 550)
+			local isSoldier = (lvl >= 550)
+			local mName = isSoldier and "Royal Soldier" or "Royal Squad"
+			local qIdx = isSoldier and 2 or 1
+			local lReq = isSoldier and 550 or 525
+			local npcCF = npcPosMap["SkyExp2Quest"]
+				or CFrame.new(KX.getNPCWorldPos("Sky Quest Giver 2", Vector3.new(-7903.4, 5635.9, -1411.5)))
+			local sps = spMap[mName]
+			if not sps or #sps == 0 then
+				sps = isSoldier
+					and {CFrame.new(-7830.0, 5606.0, -1725.0), CFrame.new(-7760.0, 5606.0, -1810.0)}
+					or {CFrame.new(-7640.0, 5606.0, -1440.0), CFrame.new(-7710.0, 5606.0, -1510.0)}
+			end
+			return {
+				questGroup = "SkyExp2Quest",
+				questIndex = qIdx,
+				levelReq = lReq,
+				mobName = mName,
+				spawns = sps,
+				npcCFrame = npcCF,
+			}
+		elseif lvl >= 450 then
+			-- Upper Skylands Temple (SkyExp1Quest: God's Guard Lv. 450 / Shanda Lv. 475)
+			local isShanda = (lvl >= 475)
+			local mName = isShanda and "Shanda" or "God's Guard"
+			local qIdx = isShanda and 2 or 1
+			local lReq = isShanda and 475 or 450
+			local npcCF = npcPosMap["SkyExp1Quest"]
+				or CFrame.new(KX.getNPCWorldPos("Mole", Vector3.new(-7859.1, 5544.5, -381.5)))
+			local sps = spMap[mName]
+			if not sps or #sps == 0 then
+				sps = isShanda
+					and {CFrame.new(-7685.0, 5565.0, -490.0), CFrame.new(-7620.0, 5565.0, -455.0)}
+					or {CFrame.new(-7845.0, 5550.0, -440.0), CFrame.new(-7910.0, 5550.0, -490.0)}
+			end
+			return {
+				questGroup = "SkyExp1Quest",
+				questIndex = qIdx,
+				levelReq = lReq,
+				mobName = mName,
+				spawns = sps,
+				npcCFrame = npcCF,
+			}
+		end
+		return nil
+	end
+
+	function KX.stepSea1SkyAndFountainFarm(hrp, customLabel)
+		local lvl = tonumber(KX.level) or 1
+
+		-- 1) Quick Starter Warmup (Lv. 1 - 9) before teleporting to Upper Skylands
+		if lvl < 10 then
+			local qInfo = KX.getBestLevelQuest()
+			if qInfo and KX.ensureQuestAccepted(qInfo, hrp) then
+				KX.farmMobSpawns(qInfo.mobName, qInfo.spawns, customLabel or ("⚔️ Sea 1 Warmup [Lv." .. tostring(lvl) .. "]"), "Melee")
+			end
+			return
+		end
+
+		-- 2) Near the Last Island of Sea 1 (Lv. 625 - 699 -> Fountain City normal quest farm)
+		if lvl >= 625 then
+			local fQuest = KX.getSea1SkyOrFountainQuestInfo()
+			if fQuest and KX.ensureQuestAccepted(fQuest, hrp) then
+				local lbl = customLabel or string.format("⛲ Sea 1 Última Isla [Lv.%d • %s]", lvl, fQuest.mobName)
+				KX.farmMobSpawns(fQuest.mobName, fQuest.spawns, lbl, "Melee")
+			end
+			return
+		end
+
+		-- 3) Lv. 450 - 624 -> Upper Skylands High-Level NPCs + Sky Mission ("los del cielo y tome la misión")
+		if lvl >= 450 then
+			local skyQuest = KX.getSea1SkyOrFountainQuestInfo()
+			if skyQuest and KX.ensureQuestAccepted(skyQuest, hrp) then
+				local lbl = customLabel or string.format("☁️ Sea 1 Cielo + Misión [Lv.%d • %s]", lvl, skyQuest.mobName)
+				local targetSet = {[skyQuest.mobName] = true}
+				local qEnemy = KX.findNearestAliveFromSet(targetSet)
+				if qEnemy then
+					KX.engageTarget(qEnemy, targetSet, lbl, "Melee")
+					return
+				end
+				-- While quest mob wave is respawning, clear any other alive Upper Skylands cluster for bonus XP!
+				local bonusSkyMob = KX.findNearestAliveFromSet(SEA1_UPPER_SKY_MOBS_SET)
+				if bonusSkyMob then
+					local bRoot = KX.getModelRoot(bonusSkyMob)
+					if bRoot and bRoot.Position.Y > 3500 then
+						KX.engageTarget(bonusSkyMob, SEA1_UPPER_SKY_MOBS_SET, lbl .. " (Bonus XP)", "Melee")
+						return
+					end
+				end
+				KX.farmMobSpawns(skyQuest.mobName, skyQuest.spawns, lbl, "Melee")
+			end
+			return
+		end
+
+		-- 4) Lv. 10 - 449 -> Upper Skylands High-Level Sky NPC Power-Farm (Shanda / Royal Squad / Royal Soldier / God's Guard)
+		local hasOldQ = KX.getActiveQuestInfo(nil, nil)
+		if hasOldQ and CommF_ and (os.clock() - lastAbandonClock >= 2.0) then
+			lastAbandonClock = os.clock()
+			pcall(function() CommF_:InvokeServer("AbandonQuest") end)
+		end
+
+		local lbl = customLabel or string.format("☁️ Sea 1 Power-Farm Cielo [Lv.%d -> 450]", lvl)
+
+		-- Prioritize Shanda [Lv. 475] & Royal Squad [Lv. 525] in Upper Skylands (Y > 3500)
+		local bestSkyMob = nil
+		local bestDist = math.huge
+		local enemies = Workspace:FindFirstChild("Enemies")
+		if enemies then
+			for _, m in ipairs(enemies:GetChildren()) do
+				if m:IsA("Model") and SEA1_UPPER_SKY_MOBS_SET[m.Name] and KX.isModelAlive(m) then
+					local p = KX.getModelRoot(m)
+					if p and p.Position.Y > 3500 then
+						local d = (p.Position - hrp.Position).Magnitude
+						if m.Name == "Shanda" then d = d * 0.7 end
+						if d < bestDist then
+							bestDist = d
+							bestSkyMob = m
+						end
+					end
+				end
+			end
+		end
+
+		if bestSkyMob then
+			KX.engageTarget(bestSkyMob, {[bestSkyMob.Name] = true}, lbl, "Melee")
+			return
+		end
+
+		if os.clock() - lastSkyPatrolClock >= 2.4 then
+			lastSkyPatrolClock = os.clock()
+			skyPatrolIdx = (skyPatrolIdx % #SEA1_UPPER_SKY_PATROL) + 1
+		end
+		local sp = SEA1_UPPER_SKY_PATROL[((skyPatrolIdx - 1) % #SEA1_UPPER_SKY_PATROL) + 1]
+		setStatus(lbl .. " (Buscando oleada en el Cielo...)", KX.phaseText)
+		KX.moveToCFrame(sp * CFrame.new(0, 20, 0))
+	end
+
 	function KX.stepStandardSeaLevelFarm(hrp, customLabel)
 		KX.stepPassiveMeleeRotation()
+		-- Sea 1 Only: Power-farm high-level Sky NPCs (+ Quest when unlocked) until Lv. 625, then Fountain City!
+		if KX.worldNum == 1 and KX.sea1SkyPriorityFarm then
+			KX.stepSea1SkyAndFountainFarm(hrp, customLabel)
+			return
+		end
 		local qInfo = KX.getBestLevelQuest()
 		if qInfo then
 			if KX.ensureQuestAccepted(qInfo, hrp) then
@@ -3947,8 +4173,9 @@ do
 	end
 
 	function KX.stepLevelingTier2(hrp)
-		-- 1) Sea 1 Saber milestone at Lv >= 200
-		if KX.level >= 200 and not KX.ownedSwords["Saber"] and KX.worldNum == 1 then
+		-- 1) Sea 1 Saber milestone (at Lv >= 625 when transitioning from Sky to Fountain City, or Lv >= 200 if normal mode)
+		local saberMinLvl = KX.sea1SkyPriorityFarm and 625 or 200
+		if KX.level >= saberMinLvl and not KX.ownedSwords["Saber"] and KX.worldNum == 1 then
 			KX.stepSea1SaberQuest(hrp)
 			return
 		end
@@ -5697,25 +5924,28 @@ do
 	addPurpleCheckbox(BoxCoreCfg, "🧲 Bring Mob (Agrupar Enemigos)", KX.bringMobs, 4, function(v)
 		KX.bringMobs = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🚫 Sin Animación de Golpe (No Hit Anim)", KX.noAttackAnimation, 5, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "☁️ Sea 1: Farm Cielo + Última Isla", KX.sea1SkyPriorityFarm, 5, function(v)
+		KX.sea1SkyPriorityFarm = v; saveConfig()
+	end)
+	addPurpleCheckbox(BoxCoreCfg, "🚫 Sin Animación de Golpe (No Hit Anim)", KX.noAttackAnimation, 6, function(v)
 		KX.noAttackAnimation = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🚀 Smart 2x EXP Codes", KX.smart2xExpCodes, 6, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🚀 Smart 2x EXP Codes", KX.smart2xExpCodes, 7, function(v)
 		KX.smart2xExpCodes = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "📊 Auto Stats (Melee/Def/Sword)", KX.autoStats, 7, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "📊 Auto Stats (Melee/Def/Sword)", KX.autoStats, 8, function(v)
 		KX.autoStats = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🛡️ Auto Buso Haki", KX.autoBuso, 8, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🛡️ Auto Buso Haki", KX.autoBuso, 9, function(v)
 		KX.autoBuso = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "👁️ Auto Ken (Observation)", KX.autoKen, 9, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "👁️ Auto Ken (Observation)", KX.autoKen, 10, function(v)
 		KX.autoKen = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "⚡ Auto Race V3", KX.autoRaceV3, 10, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "⚡ Auto Race V3", KX.autoRaceV3, 11, function(v)
 		KX.autoRaceV3 = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🌐 Smart Server Hop", KX.smartServerHop, 11, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🌐 Smart Server Hop", KX.smartServerHop, 12, function(v)
 		KX.smartServerHop = v; saveConfig()
 	end)
 
@@ -5724,7 +5954,7 @@ do
 	RaidChipBtn.Size = UDim2.new(1, 0, 0, 24)
 	RaidChipBtn.BackgroundColor3 = THEME.CheckBg
 	RaidChipBtn.BorderSizePixel = 0
-	RaidChipBtn.LayoutOrder = 12
+	RaidChipBtn.LayoutOrder = 13
 	RaidChipBtn.Font = Enum.Font.RobotoMono
 	RaidChipBtn.TextSize = 11
 	RaidChipBtn.TextColor3 = THEME.AccentBright
