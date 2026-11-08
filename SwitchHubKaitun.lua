@@ -95,11 +95,9 @@ local KX = {
 	autoKen = true,
 	autoRaceV3 = true,
 	smartServerHop = true,
-	autoRaid = true, -- Priority over Level Farm: farms Fragments for Fighting Styles & Soul Guitar
-	raidKillAura = true, -- Instant wave Kill Aura inside Dungeon Raids (Islands 1 -> 5)
-	autoAwakeRaidFruit = true, -- Awakens equipped fruit moves after completing matching Raid
-	raidMode = "Smart", -- "Smart" (until Fragment goals met) or "Always" (whenever <= 1M fruit/chip ready)
-	selectedRaid = "Auto", -- "Auto" or specific standard Raid ("Flame", "Ice", "Light", "Magma", "Buddha", etc.)
+	autoRaid = true, -- Priority Auto Dungeon Raid over Level Farm (uses fruits <= 1,000,000 Beli)
+	raidKillAuraUpTo3 = true, -- Kill Aura active on Islands 1-3 + Fighting Style (Melee) on all islands
+	selectedRaidType = "Auto", -- "Auto" (matches fruit or Flame), "Flame", "Ice", "Light", "Magma", "Buddha", "Dark"
 	tweenSpeed = 185, -- Balanced anti-rubberband speed (165 Segura / 185 Moderada / 205 Rápida)
 	attackInterval = 0.095, -- Moderate fast-click cadence (~10.5 clicks/sec, safe & smooth)
 	noAttackAnimation = true, -- Removes character M1 swing/hit animation & lunge
@@ -121,11 +119,6 @@ local KX = {
 	devilFruit = "None",
 	awakenedText = "-",
 	eliteProgress = 0,
-	inActiveRaid = false,
-	raidIslandNum = 0,
-	storedFruitsMap = {},
-	storedLowFruitsCount = 0,
-	neededFragments = 0,
 
 	-- Live Ownership Maps & Real-Time Weapon Telemetry
 	currentMeleeToolName = "None",
@@ -171,7 +164,7 @@ local KX = {
 		blueGear = false,
 	},
 
-	-- Navigation & Combat Runtime
+	-- Navigation, Raid & Combat Runtime
 	activeTween = nil,
 	activeTweenTargetPos = nil,
 	lastAimEnemy = nil,
@@ -179,6 +172,11 @@ local KX = {
 	lastAimPos = nil,
 	lastCombatTool = nil,
 	protectedTool = nil,
+	storedFruits = {},
+	wasInRaid = false,
+	raidIslandIdx = 1,
+	raidCooldownUntil = 0,
+	lastRaidStatus = "Standby",
 	failedStoreCooldown = {},
 	fruitAttemptStart = {},
 	ignoredFruits = {},
@@ -232,10 +230,8 @@ local function saveConfig()
 			autoRaceV3 = KX.autoRaceV3,
 			smartServerHop = KX.smartServerHop,
 			autoRaid = KX.autoRaid,
-			raidKillAura = KX.raidKillAura,
-			autoAwakeRaidFruit = KX.autoAwakeRaidFruit,
-			raidMode = KX.raidMode,
-			selectedRaid = KX.selectedRaid,
+			raidKillAuraUpTo3 = KX.raidKillAuraUpTo3,
+			selectedRaidType = KX.selectedRaidType,
 			tweenSpeed = KX.tweenSpeed,
 			noAttackAnimation = KX.noAttackAnimation,
 			fpsBoost = KX.fpsBoost,
@@ -274,14 +270,8 @@ local function loadConfig()
 		if type(decoded.autoRaceV3) == "boolean" then KX.autoRaceV3 = decoded.autoRaceV3 end
 		if type(decoded.smartServerHop) == "boolean" then KX.smartServerHop = decoded.smartServerHop end
 		if type(decoded.autoRaid) == "boolean" then KX.autoRaid = decoded.autoRaid end
-		if type(decoded.raidKillAura) == "boolean" then KX.raidKillAura = decoded.raidKillAura end
-		if type(decoded.autoAwakeRaidFruit) == "boolean" then KX.autoAwakeRaidFruit = decoded.autoAwakeRaidFruit end
-		if decoded.raidMode == "Smart" or decoded.raidMode == "Always" then
-			KX.raidMode = decoded.raidMode
-		end
-		if type(decoded.selectedRaid) == "string" and decoded.selectedRaid ~= "" then
-			KX.selectedRaid = decoded.selectedRaid
-		end
+		if type(decoded.raidKillAuraUpTo3) == "boolean" then KX.raidKillAuraUpTo3 = decoded.raidKillAuraUpTo3 end
+		if type(decoded.selectedRaidType) == "string" then KX.selectedRaidType = decoded.selectedRaidType end
 		if tonumber(decoded.tweenSpeed) then
 			KX.tweenSpeed = math.clamp(math.floor(tonumber(decoded.tweenSpeed)), 160, 210)
 		end
@@ -899,176 +889,120 @@ do
 		end
 		lastInvScanClock = os.clock()
 
-		-- Modern Client Inventory Replication Scan (Materials, Stored Fruits, Movesets & Masteries in 0ms)
-		pcall(function()
-			local irsMod = ReplicatedStorage:FindFirstChild("ItemReplicationService")
-			local econ = ReplicatedStorage:FindFirstChild("Economy")
-			local idMod = econ and econ:FindFirstChild("ItemId")
-			if irsMod and idMod then
-				local IRS = require(irsMod)
-				local KEYS = require(irsMod:FindFirstChild("KEYS"))
-				local ItemId = require(idMod)
-				if IRS and KEYS and ItemId and IRS.IsInitialized then
-					local matReset = {
-						["Bones"] = 0,
-						["Ectoplasm"] = 0,
-						["Dark Fragment"] = 0,
-						["Conjured Cocoa"] = 0,
-						["Alucard Fragment"] = 0,
-						["Fish Tail"] = 0,
-						["Magma Ore"] = 0,
-						["Mystic Droplet"] = 0,
-						["Dragon Scale"] = 0,
-						["Fire Essence"] = 0,
-					}
-					local fruitsReset = {}
-					local qItems = IRS:GetItems(KEYS.QUANTITY)
-					if qItems then
-						for _, j in pairs(qItems) do
-							local cnt = tonumber(j.Value) or 0
-							if cnt > 0 then
-								local okD, d = pcall(function() return ItemId.getDataFromId(j.ItemId):unwrap() end)
-								if okD and type(d) == "table" then
-									local sk = tostring(d.StorageKey or d.Name or "")
-									local tp = tostring(d.Type or "")
-									if tp == "Material" and sk ~= "" then
-										matReset[sk] = cnt
-										if sk == "Mirror Fractal" then
-											KX.ownedAccessories["Mirror Fractal"] = true
-											KX.questsDone.mirrorFractal = true
-										elseif sk == "Valkyrie Helm" then
-											KX.ownedAccessories["Valkyrie Helm"] = true
-										end
-									elseif tp == "Accessory" and sk ~= "" then
-										KX.ownedAccessories[sk] = true
-										if sk == "Mirror Fractal" then
-											KX.questsDone.mirrorFractal = true
-										end
-									elseif tp == "PhysicalMoveset" and sk ~= "" then
-										fruitsReset[sk] = (fruitsReset[sk] or 0) + cnt
-									elseif tp == "Moveset" and sk ~= "" then
-										local mHit = MELEE_ALIAS_MAP[sk:lower()]
-										if mHit then
-											KX.ownedMelees[sk] = true
-											KX.ownedMelees[mHit.ui] = true
-										end
-										for _, sEntry in ipairs(SWORD_LIST) do
-											for _, k in ipairs(sEntry.keys) do
-												if k:lower() == sk:lower() then
-													KX.ownedSwords[sk] = true
-													KX.ownedSwords[sEntry.ui] = true
-												end
-											end
-										end
-										for _, gEntry in ipairs(GUN_LIST) do
-											for _, k in ipairs(gEntry.keys) do
-												if k:lower() == sk:lower() then
-													KX.ownedGuns[sk] = true
-													KX.ownedGuns[gEntry.ui] = true
-												end
-											end
-										end
-									end
-								end
-							end
-						end
-						for k, v in pairs(matReset) do
-							KX.materials[k] = v
-						end
-						KX.storedFruitsMap = fruitsReset
-					end
+		-- Server Inventory Scan (Swords, Guns, Accessories, Materials & Stored Fruits via RemoteUtil + getInventoryWeapons)
+		local matReset = {
+			["Bones"] = 0,
+			["Ectoplasm"] = 0,
+			["Dark Fragment"] = 0,
+			["Conjured Cocoa"] = 0,
+			["Alucard Fragment"] = 0,
+			["Fish Tail"] = 0,
+			["Magma Ore"] = 0,
+			["Mystic Droplet"] = 0,
+			["Dragon Scale"] = 0,
+			["Fire Essence"] = 0,
+		}
+		local sawAnyInventorySource = false
+		local freshStoredFruits = {}
 
-					if KEYS.MASTERY then
-						local mItems = IRS:GetItems(KEYS.MASTERY)
-						if mItems then
-							for _, j in pairs(mItems) do
-								local mast = tonumber(j.Value) or 0
-								if mast > 0 then
-									local okD, d = pcall(function() return ItemId.getDataFromId(j.ItemId):unwrap() end)
-									if okD and type(d) == "table" and tostring(d.Type or "") == "Moveset" then
-										local sk = tostring(d.StorageKey or d.Name or "")
-										local mHit = MELEE_ALIAS_MAP[sk:lower()]
-										if mHit then
-											KX.meleeMastery[sk] = math.max(KX.meleeMastery[sk] or 0, mast)
-											KX.meleeMastery[mHit.ui] = math.max(KX.meleeMastery[mHit.ui] or 0, mast)
-										end
-										for _, sEntry in ipairs(SWORD_LIST) do
-											for _, k in ipairs(sEntry.keys) do
-												if k:lower() == sk:lower() then
-													KX.swordMastery[sk] = math.max(KX.swordMastery[sk] or 0, mast)
-													KX.swordMastery[sEntry.ui] = math.max(KX.swordMastery[sEntry.ui] or 0, mast)
-												end
-											end
-										end
-										for _, gEntry in ipairs(GUN_LIST) do
-											for _, k in ipairs(gEntry.keys) do
-												if k:lower() == sk:lower() then
-													KX.gunMastery[sk] = math.max(KX.gunMastery[sk] or 0, mast)
-													KX.gunMastery[gEntry.ui] = math.max(KX.gunMastery[gEntry.ui] or 0, mast)
-												end
-											end
-										end
-									end
-								end
-							end
-						end
-					end
+		local function ingestInventoryEntry(iName, iType, cnt, mast)
+			iName = tostring(iName or "")
+			iType = tostring(iType or "")
+			cnt = tonumber(cnt) or 1
+			mast = tonumber(mast) or 0
+			if iName == "" then return end
+			if iType == "Sword" then
+				KX.ownedSwords[iName] = true
+				KX.swordMastery[iName] = math.max(KX.swordMastery[iName] or 0, mast)
+			elseif iType == "Gun" then
+				KX.ownedGuns[iName] = true
+				KX.gunMastery[iName] = math.max(KX.gunMastery[iName] or 0, mast)
+			elseif iType == "Wear" or iType == "Accessory" then
+				KX.ownedAccessories[iName] = true
+				if iName == "Valkyrie Helm" then
+					KX.ownedAccessories["Valkyrie Helm"] = true
 				end
+			elseif iType == "Material" then
+				matReset[iName] = (matReset[iName] or 0) + cnt
+				if iName == "Mirror Fractal" then
+					KX.ownedAccessories["Mirror Fractal"] = true
+					KX.questsDone.mirrorFractal = true
+				elseif iName == "Valkyrie Helm" then
+					KX.ownedAccessories["Valkyrie Helm"] = true
+				end
+			elseif iType == "Blox Fruit" or iType == "PhysicalMoveset" then
+				freshStoredFruits[iName] = (freshStoredFruits[iName] or 0) + cnt
 			end
-		end)
+		end
 
-		-- Legacy Fallback Server Inventory Scan (Swords, Guns, Accessories, Materials)
 		pcall(function()
 			local inv = CommF_:InvokeServer("getInventory")
 			if type(inv) == "table" and #inv > 0 then
-				local matReset = {
-					["Bones"] = 0,
-					["Ectoplasm"] = 0,
-					["Dark Fragment"] = 0,
-					["Conjured Cocoa"] = 0,
-					["Alucard Fragment"] = 0,
-					["Fish Tail"] = 0,
-					["Magma Ore"] = 0,
-					["Mystic Droplet"] = 0,
-					["Dragon Scale"] = 0,
-					["Fire Essence"] = 0,
-				}
-				local fruitsReset = {}
+				sawAnyInventorySource = true
 				for _, item in ipairs(inv) do
 					if type(item) == "table" then
-						local iName = tostring(item.Name or "")
-						local iType = tostring(item.Type or "")
-						local cnt = tonumber(item.Count) or 1
-						local mast = tonumber(item.Mastery) or tonumber(item.Level) or 0
-						if iType == "Sword" then
-							KX.ownedSwords[iName] = true
-							KX.swordMastery[iName] = math.max(KX.swordMastery[iName] or 0, mast)
-						elseif iType == "Gun" then
-							KX.ownedGuns[iName] = true
-							KX.gunMastery[iName] = math.max(KX.gunMastery[iName] or 0, mast)
-						elseif iType == "Wear" or iType == "Accessory" then
-							KX.ownedAccessories[iName] = true
-						elseif iType == "Blox Fruit" and iName ~= "" then
-							fruitsReset[iName] = (fruitsReset[iName] or 0) + cnt
-						elseif iType == "Material" then
-							matReset[iName] = cnt
-							if iName == "Mirror Fractal" then
-								KX.ownedAccessories["Mirror Fractal"] = true
-								KX.questsDone.mirrorFractal = true
-							elseif iName == "Valkyrie Helm" then
-								KX.ownedAccessories["Valkyrie Helm"] = true
+						ingestInventoryEntry(item.Name, item.Type, item.Count, item.Mastery or item.Level)
+					end
+				end
+			end
+		end)
+
+		pcall(function()
+			local gw = CommF_:InvokeServer("getInventoryWeapons")
+			if type(gw) == "table" and #gw > 0 then
+				for _, item in ipairs(gw) do
+					if type(item) == "table" then
+						ingestInventoryEntry(item.Name, item.Type, item.Count or 1, item.Mastery or item.Level)
+					end
+				end
+			end
+		end)
+
+		pcall(function()
+			local uiCtrl = ReplicatedStorage:FindFirstChild("Controllers") and ReplicatedStorage.Controllers:FindFirstChild("UI")
+			local invCtrl = uiCtrl and uiCtrl:FindFirstChild("Inventory")
+			local ruMod = invCtrl and invCtrl:FindFirstChild("RemoteUtil")
+			if ruMod then
+				local ru = require(ruMod)
+				local idMod = debug and debug.getupvalue and debug.getupvalue(ru.invokeAction, 4)
+				local prom = ru.getTiles()
+				local tiles = nil
+				if type(prom) == "table" then
+					if type(prom.await) == "function" then
+						local a, b = prom:await()
+						tiles = (type(a) == "table" and a) or (type(b) == "table" and b)
+					elseif type(prom._get) == "function" then
+						local a, b = prom:_get()
+						tiles = (type(a) == "table" and a) or (type(b) == "table" and b)
+					end
+				end
+				if type(tiles) == "table" and type(idMod) == "table" and type(idMod.getDataFromId) == "function" then
+					if not sawAnyInventorySource then
+						for k in pairs(matReset) do matReset[k] = 0 end
+					end
+					sawAnyInventorySource = true
+					for _, tile in pairs(tiles) do
+						if type(tile) == "table" and tile.ItemId then
+							local okD, data = pcall(function() return idMod.getDataFromId(tile.ItemId):unwrap() end)
+							if okD and type(data) == "table" then
+								local tp = tostring(data.Type or "")
+								local sk = tostring(data.StorageKey or data.Name or data.DisplayName or "")
+								local cnt = tonumber(tile.Count or tile.Quantity or tile.Amount) or 1
+								local mast = tonumber(tile.Mastery or data.Mastery) or 0
+								ingestInventoryEntry(sk, tp, cnt, mast)
 							end
 						end
 					end
 				end
-				for k, v in pairs(matReset) do
-					KX.materials[k] = v
-				end
-				if next(fruitsReset) ~= nil then
-					KX.storedFruitsMap = fruitsReset
-				end
 			end
 		end)
+
+		if sawAnyInventorySource then
+			for k, v in pairs(matReset) do
+				KX.materials[k] = v
+			end
+			KX.storedFruits = freshStoredFruits
+		end
 
 		KX.scanRealtimeMeleeAndWeapons()
 
@@ -2695,6 +2629,609 @@ do
 	end
 
 	-- =========================================================================
+	-- TIER 1.5: AUTO DUNGEON RAID (PRIORITY OVER LEVEL FARM • FRUITS <= 1M BELI
+	--           • KILL AURA ISLANDS 1-3 + FIGHTING STYLE MELEE ON ALL ISLANDS)
+	-- =========================================================================
+	local RAID_FRUITS_MAX_1M = {
+		{key = "Rocket-Rocket",   price = 5000},
+		{key = "Spin-Spin",       price = 7500},
+		{key = "Blade-Blade",     price = 30000},
+		{key = "Chop-Chop",       price = 30000},
+		{key = "Spring-Spring",   price = 60000},
+		{key = "Bomb-Bomb",       price = 80000},
+		{key = "Smoke-Smoke",     price = 100000},
+		{key = "Spike-Spike",     price = 180000},
+		{key = "Flame-Flame",     price = 250000},
+		{key = "Ice-Ice",         price = 350000},
+		{key = "Sand-Sand",       price = 420000},
+		{key = "Dark-Dark",       price = 500000},
+		{key = "Eagle-Eagle",     price = 550000},
+		{key = "Falcon-Falcon",   price = 550000},
+		{key = "Diamond-Diamond", price = 600000},
+		{key = "Light-Light",     price = 650000},
+		{key = "Rubber-Rubber",   price = 750000},
+		{key = "Ghost-Ghost",     price = 940000},
+		{key = "Magma-Magma",     price = 960000},
+		{key = "Quake-Quake",     price = 1000000},
+	}
+
+	local RAID_FRUIT_PRICE_MAP = {}
+	for _, entry in ipairs(RAID_FRUITS_MAX_1M) do
+		RAID_FRUIT_PRICE_MAP[entry.key] = entry.price
+	end
+
+	local STANDARD_RAID_CHIPS = {
+		["Flame-Flame"]   = "Flame",
+		["Ice-Ice"]       = "Ice",
+		["Quake-Quake"]   = "Quake",
+		["Light-Light"]   = "Light",
+		["Dark-Dark"]     = "Dark",
+		["Spider-Spider"] = "Spider",
+		["String-String"] = "Spider",
+		["Rumble-Rumble"] = "Rumble",
+		["Lightning-Lightning"] = "Rumble",
+		["Magma-Magma"]   = "Magma",
+		["Buddha-Buddha"] = "Buddha",
+		["Sand-Sand"]     = "Sand",
+	}
+
+	local raidEnteredAt = 0
+	local islandClearClock = 0
+	local summonArriveClock = 0
+	local raidChipFailCount = 0
+	local lastRaidChipBuyClock = 0
+	local lastRaidFruitLoadClock = 0
+	local lastRaidBtnClickClock = 0
+	local postRaidAwakenUntil = 0
+	local lastAwakenTryClock = 0
+	local lastKillAuraPulseClock = 0
+
+	function KX.getPreferredRaidChipName()
+		local sel = tostring(KX.selectedRaidType or "Auto")
+		if sel ~= "" and sel ~= "Auto" then
+			return sel
+		end
+		local dfChip = STANDARD_RAID_CHIPS[tostring(KX.devilFruit or "")]
+		if dfChip then
+			return dfChip
+		end
+		return "Flame"
+	end
+
+	local function isPhysicalFruitToolForRaid(tool)
+		if not tool or not tool:IsA("Tool") then return false end
+		if tool.ToolTip == "Blox Fruit" or tool.ToolTip == "Melee" or tool.ToolTip == "Sword" or tool.ToolTip == "Gun" then
+			return false
+		end
+		return (tool.Name:find(" Fruit") ~= nil)
+			or (tool:FindFirstChild("EatRemote") ~= nil)
+			or (tostring(tool:GetAttribute("OriginalName") or ""):find("-") ~= nil)
+	end
+
+	local function getPhysicalFruitKeyAndMax1MPrice(tool)
+		local orig = tostring(tool:GetAttribute("OriginalName") or "")
+		if orig == "" then
+			local base = tool.Name:gsub(" Fruit$", "")
+			orig = base .. "-" .. base
+		end
+		return orig, RAID_FRUIT_PRICE_MAP[orig]
+	end
+
+	function KX.findRaidIslandPart(islandNum, refPos)
+		local wo = Workspace:FindFirstChild("_WorldOrigin")
+		local locs = wo and wo:FindFirstChild("Locations")
+		if not locs or not refPos then return nil, math.huge end
+		local targetName = "Island " .. tostring(islandNum)
+		local bestPart = nil
+		local bestDist = 4800
+		for _, l in ipairs(locs:GetChildren()) do
+			if l:IsA("BasePart") and l.Name == targetName then
+				local d = (l.Position - refPos).Magnitude
+				if d < bestDist then
+					bestDist = d
+					bestPart = l
+				end
+			end
+		end
+		return bestPart, bestDist
+	end
+
+	function KX.isPlayerInRaid(hrp)
+		local pg = LocalPlayer:FindFirstChild("PlayerGui")
+		local main = pg and (pg:FindFirstChild("Main") or pg:FindFirstChild("Main (minimal)"))
+		if main then
+			local thl = main:FindFirstChild("TopHUDList")
+			local rt = thl and thl:FindFirstChild("RaidTimer")
+			if rt and rt:IsA("GuiObject") and rt.Visible and tostring(rt.Text or ""):find("%d") then
+				return true
+			end
+			local tmr = main:FindFirstChild("Timer")
+			if tmr and tmr:IsA("GuiObject") and tmr.Visible and tostring(tmr.Text or ""):find("%d") then
+				return true
+			end
+		end
+		if hrp then
+			for i = 1, 5 do
+				local part, dist = KX.findRaidIslandPart(i, hrp.Position)
+				if part and dist < 2400 then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
+	function KX.isInAwakeningRoom(hrp)
+		if not hrp then return false end
+		local wo = Workspace:FindFirstChild("_WorldOrigin")
+		local locs = wo and wo:FindFirstChild("Locations")
+		if locs then
+			for _, l in ipairs(locs:GetChildren()) do
+				if l:IsA("BasePart") and l.Name:lower():find("awakening") and (l.Position - hrp.Position).Magnitude < 500 then
+					return true
+				end
+			end
+		end
+		for _, folder in ipairs({Workspace:FindFirstChild("NPCs"), ReplicatedStorage:FindFirstChild("NPCs")}) do
+			local npc = folder and folder:FindFirstChild("Mysterious Entity")
+			if npc then
+				local ok, cf = pcall(function() return npc:GetPivot() end)
+				if ok and cf and (cf.Position - hrp.Position).Magnitude < 350 then
+					return true
+				end
+			end
+		end
+		return false
+	end
+
+	-- Kill Aura strictly for Raid Islands 1, 2, and 3!
+	function KX.applyRaidKillAura(centerPos)
+		if not KX.raidKillAuraUpTo3 or (KX.raidIslandIdx or 1) > 3 then
+			return
+		end
+		if os.clock() - lastKillAuraPulseClock < 0.16 then
+			return
+		end
+		lastKillAuraPulseClock = os.clock()
+
+		pcall(function()
+			if sethiddenproperty then
+				sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
+			end
+		end)
+
+		local enemies = Workspace:FindFirstChild("Enemies")
+		if not enemies or not centerPos then return end
+		for _, m in ipairs(enemies:GetChildren()) do
+			if m:IsA("Model") and KX.isModelAlive(m) then
+				local eHum = m:FindFirstChildOfClass("Humanoid")
+				local eRoot = KX.getModelRoot(m)
+				if eHum and eRoot and (eRoot.Position - centerPos).Magnitude <= 550 then
+					pcall(function()
+						eRoot.CanCollide = false
+						eRoot.AssemblyLinearVelocity = Vector3.zero
+						eHum.WalkSpeed = 0
+						eHum.JumpPower = 0
+						eHum.Health = 0
+					end)
+				end
+			end
+		end
+	end
+
+	-- Stores any > 1,000,000 Beli physical fruit in Character/Backpack so RaidsNpc NEVER consumes a >1M fruit!
+	function KX.safeguardHighValueFruitsBeforeRaid(allowedLowTool)
+		if not CommF_ then return false end
+		local hasUnsafeHighFruit = false
+		for _, cont in ipairs({LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack")}) do
+			if cont then
+				for _, tool in ipairs(cont:GetChildren()) do
+					if isPhysicalFruitToolForRaid(tool) and tool ~= allowedLowTool then
+						local origKey, lowPrice = getPhysicalFruitKeyAndMax1MPrice(tool)
+						local canUseLow = lowPrice and lowPrice <= 1000000 and (origKey ~= "Quake-Quake" or KX.questsDone.donSwan)
+						if not canUseLow then
+							pcall(function()
+								CommF_:InvokeServer("StoreFruit", origKey, tool)
+							end)
+							task.wait(0.1)
+							if tool.Parent == LocalPlayer.Character or tool.Parent == LocalPlayer:FindFirstChild("Backpack") then
+								hasUnsafeHighFruit = true
+							end
+						end
+					end
+				end
+			end
+		end
+		return not hasUnsafeHighFruit
+	end
+
+	function KX.getHeldRaidFruitMax1M()
+		local bestTool, bestKey, bestPrice = nil, nil, math.huge
+		for _, cont in ipairs({LocalPlayer:FindFirstChild("Backpack"), LocalPlayer.Character}) do
+			if cont then
+				for _, tool in ipairs(cont:GetChildren()) do
+					if isPhysicalFruitToolForRaid(tool) then
+						local origKey, lowPrice = getPhysicalFruitKeyAndMax1MPrice(tool)
+						local allowQuake = (origKey ~= "Quake-Quake") or KX.questsDone.donSwan
+						local wantToEat = KX.autoEatAllowedFruits and KX.allowedEatFruits[origKey] and not KX.allowedEatFruits[KX.devilFruit]
+						if lowPrice and lowPrice <= 1000000 and allowQuake and (not wantToEat) and lowPrice < bestPrice then
+							bestPrice = lowPrice
+							bestTool = tool
+							bestKey = origKey
+						end
+					end
+				end
+			end
+		end
+		return bestTool, bestKey, bestPrice
+	end
+
+	function KX.hasOrCanLoadRaidFruitMax1M()
+		local held = KX.getHeldRaidFruitMax1M()
+		if held then return true end
+		for _, entry in ipairs(RAID_FRUITS_MAX_1M) do
+			local fk = entry.key
+			local allowQuake = (fk ~= "Quake-Quake") or KX.questsDone.donSwan
+			local wantToEat = KX.autoEatAllowedFruits and KX.allowedEatFruits[fk] and not KX.allowedEatFruits[KX.devilFruit]
+			if allowQuake and (not wantToEat) and (KX.storedFruits[fk] or 0) > 0 then
+				return true
+			end
+		end
+		return false
+	end
+
+	function KX.ensureRaidFruitMax1MInBackpack()
+		local heldTool, heldKey, heldPrice = KX.getHeldRaidFruitMax1M()
+		if heldTool then
+			KX.protectedTool = heldTool
+			return heldTool, heldKey, heldPrice
+		end
+		if not CommF_ or (os.clock() - lastRaidFruitLoadClock < 2.2) then
+			return nil
+		end
+		lastRaidFruitLoadClock = os.clock()
+
+		-- Refresh storedFruits from modern Inventory.RemoteUtil tiles if needed
+		local candidates = {}
+		for _, entry in ipairs(RAID_FRUITS_MAX_1M) do
+			local fk = entry.key
+			local allowQuake = (fk ~= "Quake-Quake") or KX.questsDone.donSwan
+			local wantToEat = KX.autoEatAllowedFruits and KX.allowedEatFruits[fk] and not KX.allowedEatFruits[KX.devilFruit]
+			if allowQuake and (not wantToEat) and (KX.storedFruits[fk] or 0) > 0 then
+				table.insert(candidates, entry)
+			end
+		end
+
+		local tryList = (#candidates > 0) and candidates or RAID_FRUITS_MAX_1M
+		for _, entry in ipairs(tryList) do
+			local fk = entry.key
+			local allowQuake = (fk ~= "Quake-Quake") or KX.questsDone.donSwan
+			local wantToEat = KX.autoEatAllowedFruits and KX.allowedEatFruits[fk] and not KX.allowedEatFruits[KX.devilFruit]
+			if allowQuake and not wantToEat then
+				pcall(function()
+					local ch = LocalPlayer.Character
+					local busy = ch and ch:FindFirstChild("Busy")
+					if busy and busy:IsA("BoolValue") then busy.Value = false end
+					CommF_:InvokeServer("LoadFruit", fk)
+				end)
+				task.wait(0.18)
+				local loadedTool, loadedKey, loadedPrice = KX.getHeldRaidFruitMax1M()
+				if loadedTool then
+					if KX.storedFruits[loadedKey] and KX.storedFruits[loadedKey] > 0 then
+						KX.storedFruits[loadedKey] = KX.storedFruits[loadedKey] - 1
+					end
+					KX.protectedTool = loadedTool
+					return loadedTool, loadedKey, loadedPrice
+				end
+				if #candidates > 0 then
+					break
+				end
+			end
+		end
+		return nil
+	end
+
+	function KX.needsFragmentsForProgression()
+		if not KX.ownedMelees["Godhuman"] then
+			for _, st in ipairs(STYLE_PIPELINE) do
+				if (st.frag or 0) > 0 and KX.getStyleMastery(st) < st.reqMast then
+					if KX.fragments < st.frag then
+						return true
+					end
+				end
+			end
+			if KX.fragments < 15000 then
+				return true
+			end
+		end
+		if not KX.ownedGuns["Soul Guitar"] and KX.fragments < 5000 then
+			return true
+		end
+		if not KX.ownedGuns["Kabucha"] and KX.fragments < 1500 then
+			return true
+		end
+		return false
+	end
+
+	function KX.tryStepAutoRaid(hrp, hum)
+		local inRaid = KX.isPlayerInRaid(hrp)
+		local raidChip = KX.getPreferredRaidChipName()
+
+		-- 1) ACTIVE DUNGEON RAID EXECUTION (ISLAND 1 -> ISLAND 5)
+		--    Islands 1-3: Kill Aura + Fighting Style (Melee)
+		--    Islands 4-5: Fighting Style (Melee) Only!
+		if inRaid then
+			if not KX.wasInRaid then
+				KX.wasInRaid = true
+				raidEnteredAt = os.clock()
+				KX.raidIslandIdx = 1
+				islandClearClock = 0
+				summonArriveClock = 0
+				raidChipFailCount = 0
+				KX.protectedTool = nil
+			end
+
+			KX.stepPassiveMeleeRotation()
+
+			pcall(function()
+				if sethiddenproperty then
+					sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
+				end
+			end)
+
+			-- Update current island index if player or mob is near a higher island (1..5)
+			for k = 1, 5 do
+				local iPart, iDist = KX.findRaidIslandPart(k, hrp.Position)
+				if iPart and iDist < 650 and k > (KX.raidIslandIdx or 1) then
+					KX.raidIslandIdx = k
+				end
+			end
+
+			local mob = KX.findNearestAliveFromSet(nil)
+			if mob then
+				local mRoot = KX.getModelRoot(mob)
+				if mRoot and (mRoot.Position - hrp.Position).Magnitude <= 2600 then
+					for k = 1, 5 do
+						local iPart, iDist = KX.findRaidIslandPart(k, mRoot.Position)
+						if iPart and iDist < 900 and k > (KX.raidIslandIdx or 1) then
+							KX.raidIslandIdx = k
+						end
+					end
+					islandClearClock = 0
+					local curIsl = KX.raidIslandIdx or 1
+					local useKA = (curIsl <= 3) and KX.raidKillAuraUpTo3
+					local modeTag = useKA and "Kill Aura + Melee" or "Solo Melee"
+					KX.phaseText = string.format("Auto Raid [%s] • Isla %d/5 (%s)", raidChip, curIsl, modeTag)
+					KX.lastRaidStatus = string.format("Isla %d/5 (%s)", curIsl, modeTag)
+
+					-- Always attack with Fighting Style (Melee) so mastery & hits register cleanly
+					KX.engageTarget(
+						mob,
+						(not useKA) and nil or nil,
+						string.format("⚡ Raid %s [Isla %d/5 • %s]", raidChip, curIsl, modeTag),
+						"Melee"
+					)
+					if not useKA and mRoot then
+						KX.bringClusterMobs(mRoot.Position, nil)
+					end
+					if useKA then
+						KX.applyRaidKillAura(hrp.Position)
+					end
+					return true
+				end
+			end
+
+			-- No alive mobs on current island -> Advance to next Raid Island (1 -> 2 -> 3 -> 4 -> 5)!
+			if islandClearClock > 0
+				and (os.clock() - islandClearClock >= 3.2)
+				and (os.clock() - raidEnteredAt >= 5.0)
+				and (KX.raidIslandIdx or 1) < 5 then
+				local nextPart = KX.findRaidIslandPart((KX.raidIslandIdx or 1) + 1, hrp.Position)
+				if nextPart then
+					KX.raidIslandIdx = (KX.raidIslandIdx or 1) + 1
+					islandClearClock = 0
+				end
+			end
+
+			local islPart = KX.findRaidIslandPart(KX.raidIslandIdx or 1, hrp.Position)
+			if not islPart then
+				for k = 5, 1, -1 do
+					local p = KX.findRaidIslandPart(k, hrp.Position)
+					if p then
+						KX.raidIslandIdx = k
+						islPart = p
+						break
+					end
+				end
+			end
+
+			local curIsl = KX.raidIslandIdx or 1
+			local useKA = (curIsl <= 3) and KX.raidKillAuraUpTo3
+			local modeTag = useKA and "Kill Aura + Melee" or "Solo Melee"
+			KX.phaseText = string.format("Auto Raid [%s] • Isla %d/5 (%s)", raidChip, curIsl, modeTag)
+			KX.lastRaidStatus = string.format("Isla %d/5 (%s)", curIsl, modeTag)
+
+			if islPart then
+				local hoverPos = islPart.Position + Vector3.new(0, 26, 0)
+				setStatus(string.format("⚡ Raid %s: Avanzando / Esperando oleada en Isla %d/5 (%s)...", raidChip, curIsl, modeTag), KX.phaseText)
+				local reached = KX.moveToCFrame(CFrame.new(hoverPos))
+				if reached or (hrp.Position - hoverPos).Magnitude <= 55 then
+					if islandClearClock == 0 then
+						islandClearClock = os.clock()
+					end
+					if useKA then
+						KX.applyRaidKillAura(hrp.Position)
+					end
+				end
+			else
+				setStatus(string.format("⚡ Raid %s activa: Esperando carga de Isla %d/5...", raidChip, curIsl), KX.phaseText)
+			end
+			return true
+		end
+
+		-- 2) POST-RAID AWAKENING ROOM HANDLER
+		if KX.wasInRaid then
+			KX.wasInRaid = false
+			raidEnteredAt = 0
+			KX.raidIslandIdx = 1
+			islandClearClock = 0
+			postRaidAwakenUntil = os.clock() + 4.5
+			KX.lastRaidStatus = "Raid Completada (+Fragmentos)"
+		end
+
+		local inAwkRoom = KX.isInAwakeningRoom(hrp)
+		if os.clock() < postRaidAwakenUntil or inAwkRoom then
+			if CommF_ and (os.clock() - lastAwakenTryClock >= 1.5) then
+				lastAwakenTryClock = os.clock()
+				pcall(function()
+					CommF_:InvokeServer("Awakener", "Check")
+					CommF_:InvokeServer("Awakener", "Awaken")
+				end)
+			end
+			if inAwkRoom and CommF_ then
+				pcall(function() CommF_:InvokeServer("Awakener", "Teleport") end)
+				setStatus("✨ Saliendo de Awakening Room tras completar la Raid...", "Auto Raid")
+				return true
+			elseif os.clock() < postRaidAwakenUntil then
+				setStatus("✨ ¡Raid completada! Verificando despertar / fragmentos...", "Auto Raid")
+				return true
+			end
+		end
+
+		if not KX.autoRaid then
+			KX.lastRaidStatus = "Off"
+			return false
+		end
+
+		-- Must be in Sea 2 or Sea 3 and Lv >= 1100 to purchase Special Microchip from RaidsNpc
+		if (KX.worldNum ~= 2 and KX.worldNum ~= 3) or KX.level < 1100 then
+			KX.lastRaidStatus = (KX.level < 1100) and ("Req. Lv.1100 (" .. tostring(KX.level) .. ")") or "Esperando Sea 2/3"
+			return false
+		end
+
+		local chipTool = KX.hasToolAnywhere("Special Microchip")
+		if not chipTool then
+			if os.clock() < (KX.raidCooldownUntil or 0) then
+				local remCd = math.max(1, math.ceil((KX.raidCooldownUntil or 0) - os.clock()))
+				KX.lastRaidStatus = string.format("En espera (%ds)", remCd)
+				return false
+			end
+
+			local hasFruitMax1M = KX.hasOrCanLoadRaidFruitMax1M()
+			local needFrags = KX.needsFragmentsForProgression()
+			if not hasFruitMax1M and not (needFrags and KX.beli >= 1100000) then
+				KX.raidCooldownUntil = os.clock() + 60.0
+				KX.lastRaidStatus = "Sin Fruta <=1M disponible"
+				return false
+			end
+
+			summonArriveClock = 0
+			KX.phaseText = "Tier 1.5: Auto Raid (Preparando Microchip <=1M)"
+
+			local lowFruitTool, lowFruitKey, lowFruitPrice = KX.ensureRaidFruitMax1MInBackpack()
+			if not KX.safeguardHighValueFruitsBeforeRaid(lowFruitTool) then
+				-- Unsafe >1M fruit in backpack that couldn't be stored -> never risk it!
+				KX.protectedTool = nil
+				KX.raidCooldownUntil = os.clock() + 60.0
+				KX.lastRaidStatus = "Protegiendo Fruta >1M"
+				return false
+			end
+
+			if CommF_ and (os.clock() - lastRaidChipBuyClock >= 2.2) then
+				lastRaidChipBuyClock = os.clock()
+				setStatus(
+					string.format(
+						"⚡ Auto Raid [%s]: Comprando Special Microchip %s...",
+						raidChip,
+						lowFruitKey and ("con " .. tostring(lowFruitKey) .. " ($" .. tostring(lowFruitPrice or 0) .. ")") or "(Beli)"
+					),
+					KX.phaseText
+				)
+				pcall(function()
+					CommF_:InvokeServer("RaidsNpc", "Select", raidChip)
+				end)
+				task.wait(0.25)
+				chipTool = KX.hasToolAnywhere("Special Microchip")
+				if chipTool then
+					raidChipFailCount = 0
+					KX.protectedTool = nil
+				else
+					raidChipFailCount = raidChipFailCount + 1
+				end
+			end
+
+			if not chipTool then
+				if raidChipFailCount >= 2 then
+					raidChipFailCount = 0
+					KX.protectedTool = nil
+					KX.raidCooldownUntil = os.clock() + 75.0
+					KX.lastRaidStatus = "Cooldown Chip (75s)"
+					return false
+				end
+				return true
+			end
+		end
+
+		-- 3) HOLDING "SPECIAL MICROCHIP" -> FLY TO RAIDSUMMON2 CAPSULE & START RAID!
+		KX.protectedTool = nil
+		KX.phaseText = string.format("Tier 1.5: Auto Raid [%s] (Iniciando Cápsula)", raidChip)
+		KX.lastRaidStatus = "Iniciando en Cápsula (" .. raidChip .. ")"
+
+		local map = Workspace:FindFirstChild("Map")
+		local raidSummon2 = nil
+		if KX.worldNum == 2 then
+			local ci = map and map:FindFirstChild("CircleIsland")
+			raidSummon2 = ci and ci:FindFirstChild("RaidSummon2")
+		else
+			local bc = map and (map:FindFirstChild("Boat Castle") or map:FindFirstChild("Castle"))
+			raidSummon2 = (bc and bc:FindFirstChild("RaidSummon2", true)) or (map and map:FindFirstChild("RaidSummon2", true))
+		end
+
+		local btnMain = raidSummon2 and raidSummon2:FindFirstChild("Button") and raidSummon2.Button:FindFirstChild("Main")
+		local cd = btnMain and btnMain:FindFirstChildOfClass("ClickDetector")
+		local podPart = raidSummon2 and raidSummon2:FindFirstChild("Raid1") and raidSummon2.Raid1:FindFirstChild("Color")
+		local btnPos = (btnMain and btnMain:IsA("BasePart") and btnMain.Position)
+			or ((KX.worldNum == 2) and Vector3.new(-6528.17, 306.51, -4670.70) or Vector3.new(-5017.5, 314.8, -2825.4))
+
+		-- Fast Sea 3 Castle on the Sea portal shortcut if far from RaidSummon2
+		if KX.worldNum == 3 and (hrp.Position - btnPos).Magnitude > 1200 and CommF_ and (os.clock() - lastPortalClock >= 3.5) then
+			lastPortalClock = os.clock()
+			KX.stopTween()
+			pcall(function()
+				CommF_:InvokeServer("requestEntrance", Vector3.new(-5075.5, 314.5, -3150.0))
+			end)
+			task.wait(0.25)
+			hrp, hum = KX.getRootAndHum()
+			if not hrp or not hum then return true end
+		end
+
+		setStatus(string.format("⚡ Auto Raid [%s]: Activando cápsula de Raid...", raidChip), KX.phaseText)
+		local targetStandPos = btnPos + Vector3.new(0, 3, 0)
+		if summonArriveClock > 0 and (os.clock() - summonArriveClock > 4.0) and podPart and podPart:IsA("BasePart") then
+			targetStandPos = podPart.Position + Vector3.new(0, 3, 0)
+		end
+
+		local reached = KX.moveToCFrame(CFrame.new(targetStandPos))
+		if reached or (hrp.Position - btnPos).Magnitude <= 28 then
+			if summonArriveClock == 0 then
+				summonArriveClock = os.clock()
+			end
+			pcall(function() hum:UnequipTools() end)
+			if cd and fireclickdetector and (os.clock() - lastRaidBtnClickClock >= 1.3) then
+				lastRaidBtnClickClock = os.clock()
+				pcall(function() fireclickdetector(cd) end)
+			end
+			if (os.clock() - summonArriveClock > 16.0) then
+				summonArriveClock = 0
+				KX.raidCooldownUntil = os.clock() + 45.0
+				KX.serverHop("Cápsulas de Raid ocupadas")
+				return true
+			end
+		end
+		return true
+	end
+
+	-- =========================================================================
 	-- TIER 2: LEVEL 1 -> MAX (2800) + SEA 1/2/3 STORYLINE + SABER
 	-- =========================================================================
 	local JUNGLE_BUTTONS_FALLBACK = {
@@ -3931,679 +4468,11 @@ do
 	end
 
 	-- =========================================================================
-	-- AUTO RAID ENGINE (PRIORITY OVER LEVEL FARM, <= 1M FRUITS, KILL AURA & ISLANDS 1->5)
-	-- =========================================================================
-	local RAID_MAX_1M_FRUITS = {
-		{key = "Rocket-Rocket",   price = 5000},
-		{key = "Spin-Spin",       price = 7500},
-		{key = "Blade-Blade",     price = 30000},
-		{key = "Chop-Chop",       price = 30000},
-		{key = "Spring-Spring",   price = 60000},
-		{key = "Bomb-Bomb",       price = 80000},
-		{key = "Smoke-Smoke",     price = 100000},
-		{key = "Spike-Spike",     price = 180000},
-		{key = "Flame-Flame",     price = 250000},
-		{key = "Ice-Ice",         price = 350000},
-		{key = "Sand-Sand",       price = 420000},
-		{key = "Dark-Dark",       price = 500000},
-		{key = "Eagle-Eagle",     price = 550000},
-		{key = "Falcon-Falcon",   price = 550000},
-		{key = "Diamond-Diamond", price = 600000},
-		{key = "Light-Light",     price = 650000},
-		{key = "Rubber-Rubber",   price = 750000},
-		{key = "Ghost-Ghost",     price = 940000},
-		{key = "Magma-Magma",     price = 960000},
-		{key = "Quake-Quake",     price = 1000000},
-	}
-
-	local STANDARD_RAIDS_MAP = {
-		["Flame-Flame"]   = "Flame",
-		["Ice-Ice"]       = "Ice",
-		["Quake-Quake"]   = "Quake",
-		["Light-Light"]   = "Light",
-		["Dark-Dark"]     = "Dark",
-		["Spider-Spider"] = "Spider",
-		["String-String"] = "Spider",
-		["Magma-Magma"]   = "Magma",
-		["Buddha-Buddha"] = "Buddha",
-		["Sand-Sand"]     = "Sand",
-	}
-
-	local cachedRaidFruitPrices = nil
-	local function getRaidFruitPriceMap()
-		if cachedRaidFruitPrices then return cachedRaidFruitPrices end
-		local m = {}
-		for _, entry in ipairs(RAID_MAX_1M_FRUITS) do
-			m[entry.key] = entry.price
-		end
-		pcall(function()
-			local fd = require(ReplicatedStorage.Controllers.UI.FruitShop.Data)
-			if type(fd) == "table" then
-				for k, v in pairs(fd) do
-					if type(v) == "table" and tonumber(v.Price) then
-						m[tostring(k)] = tonumber(v.Price)
-					end
-				end
-			end
-		end)
-		cachedRaidFruitPrices = m
-		return m
-	end
-
-	local function isRaidPhysicalFruitTool(tool)
-		if not tool or not tool:IsA("Tool") then return false end
-		if tool.ToolTip == "Blox Fruit" or tool.ToolTip == "Melee" or tool.ToolTip == "Sword" or tool.ToolTip == "Gun" then
-			return false
-		end
-		if tool.Name == "Special Microchip" or tool.Name == "Core Brain" then
-			return false
-		end
-		return (tool.Name:find(" Fruit") ~= nil)
-			or (tool:FindFirstChild("EatRemote") ~= nil)
-			or (tostring(tool:GetAttribute("OriginalName") or ""):find("-") ~= nil)
-	end
-
-	local function getPhysicalFruitKeyAndPrice(tool)
-		local base = tool.Name:gsub(" Fruit$", "")
-		local sKey = tostring(tool:GetAttribute("OriginalName") or (base .. "-" .. base))
-		local pMap = getRaidFruitPriceMap()
-		local pr = pMap[sKey] or pMap[base .. "-" .. base]
-		return sKey, pr
-	end
-
-	local function isFruitAllowedForRaidChip(sKey, price)
-		if not price or price > 1000000 then
-			return false
-		end
-		-- Preserve Quake-Quake ($1M) in Sea 2 if Don Swan door hasn't been unlocked yet!
-		if sKey == "Quake-Quake" and KX.worldNum == 2 and not KX.questsDone.donSwan then
-			return false
-		end
-		-- Respect Eat Allowed Fruits Only if player hasn't eaten an allowed fruit yet
-		if KX.autoEatAllowedFruits and KX.allowedEatFruits[sKey] and not KX.allowedEatFruits[KX.devilFruit] then
-			return false
-		end
-		return true
-	end
-
-	function KX.countAvailableMax1MFruits()
-		local pMap = getRaidFruitPriceMap()
-		local count = 0
-		for sKey, qty in pairs(KX.storedFruitsMap or {}) do
-			local n = tonumber(qty) or 0
-			local pr = pMap[sKey]
-			if n > 0 and isFruitAllowedForRaidChip(sKey, pr) then
-				count = count + n
-			end
-		end
-		for _, cont in ipairs({LocalPlayer:FindFirstChild("Backpack"), LocalPlayer.Character}) do
-			if cont then
-				for _, t in ipairs(cont:GetChildren()) do
-					if isRaidPhysicalFruitTool(t) then
-						local sKey, pr = getPhysicalFruitKeyAndPrice(t)
-						if isFruitAllowedForRaidChip(sKey, pr) then
-							count = count + 1
-						end
-					end
-				end
-			end
-		end
-		KX.storedLowFruitsCount = count
-		return count
-	end
-
-	function KX.calcNeededFragments()
-		local need = 0
-		if not KX.ownedMelees["Godhuman"] then
-			need = need + 5000
-			if not KX.ownedMelees["Dragon Breath"] and KX.getStyleMastery({name = "Dragon Claw", alt = "Dragon Breath"}) < 400 then
-				need = need + 1500
-			end
-			if not KX.ownedMelees["Death Step"] and KX.getStyleMastery({name = "Death Step", alt = "Death Step"}) < 400 then
-				need = need + 5000
-			end
-			if not KX.ownedMelees["Sharkman Karate"] and KX.getStyleMastery({name = "Sharkman Karate", alt = "Sharkman Karate"}) < 400 then
-				need = need + 5000
-			end
-			if not KX.ownedMelees["Electric Claw"] and KX.getStyleMastery({name = "Electric Claw", alt = "Electric Claw"}) < 400 then
-				need = need + 5000
-			end
-			if not KX.ownedMelees["Dragon Talon"] and KX.getStyleMastery({name = "Dragon Talon", alt = "Dragon Talon"}) < 400 then
-				need = need + 5000
-			end
-		end
-		if not KX.ownedGuns["Soul Guitar"] then
-			need = need + 5000
-		end
-		if not KX.ownedGuns["Kabucha"] then
-			need = need + 1500
-		end
-		KX.neededFragments = need
-		return need
-	end
-
-	function KX.getEffectiveRaidName()
-		if KX.selectedRaid and KX.selectedRaid ~= "" and KX.selectedRaid ~= "Auto" then
-			return KX.selectedRaid
-		end
-		local matchFruit = STANDARD_RAIDS_MAP[tostring(KX.devilFruit or "")]
-		if matchFruit and KX.autoAwakeRaidFruit then
-			-- Avoid Buddha Raid solo if under-leveled; Flame is fastest for pure Fragment speed
-			if matchFruit ~= "Buddha" or KX.level >= 2200 then
-				return matchFruit
-			end
-		end
-		return "Flame"
-	end
-
-	function KX.findRaidIslandPart(islandNum, refPos)
-		local wo = Workspace:FindFirstChild("_WorldOrigin")
-		local locs = wo and wo:FindFirstChild("Locations")
-		if not locs or not refPos then return nil, math.huge end
-		local targetName = "Island " .. tostring(islandNum)
-		local bestPart = nil
-		local bestDist = 4800
-		for _, l in ipairs(locs:GetChildren()) do
-			if l:IsA("BasePart") and l.Name == targetName then
-				local d = (l.Position - refPos).Magnitude
-				if d < bestDist then
-					bestDist = d
-					bestPart = l
-				end
-			end
-		end
-		return bestPart, bestDist
-	end
-
-	local lastRaidTimerSeenClock = 0
-	function KX.isPlayerInRaid(hrp)
-		local pg = LocalPlayer:FindFirstChild("PlayerGui")
-		for _, gName in ipairs({"Main", "Main (minimal)"}) do
-			local main = pg and pg:FindFirstChild(gName)
-			if main then
-				local thl = main:FindFirstChild("TopHUDList")
-				local rt = thl and thl:FindFirstChild("RaidTimer")
-				if rt and rt:IsA("GuiObject") and rt.Visible and tostring(rt.Text or ""):find("%d") then
-					lastRaidTimerSeenClock = os.clock()
-					return true
-				end
-				local tmr = main:FindFirstChild("Timer")
-				if tmr and tmr:IsA("GuiObject") and tmr.Visible and tostring(tmr.Text or ""):find("%d") then
-					lastRaidTimerSeenClock = os.clock()
-					return true
-				end
-			end
-		end
-		if hrp then
-			for i = 1, 5 do
-				local part, dist = KX.findRaidIslandPart(i, hrp.Position)
-				if part and dist < 2500 then
-					lastRaidTimerSeenClock = os.clock()
-					return true
-				end
-			end
-		end
-		if os.clock() - lastRaidTimerSeenClock < 2.2 then
-			return true
-		end
-		return false
-	end
-
-	local function isInAwakeningRoom(hrp)
-		if not hrp then return false end
-		local wo = Workspace:FindFirstChild("_WorldOrigin")
-		local locs = wo and wo:FindFirstChild("Locations")
-		if locs then
-			for _, l in ipairs(locs:GetChildren()) do
-				if l:IsA("BasePart") and l.Name:lower():find("awakening") and (l.Position - hrp.Position).Magnitude < 500 then
-					return true
-				end
-			end
-		end
-		return false
-	end
-
-	-- Instant Network-Owned Raid Kill Aura + Nearest Survivor Finder
-	function KX.runRaidKillAura(hrp)
-		if not hrp then return 0, nil end
-		pcall(function()
-			if sethiddenproperty then
-				sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
-			end
-		end)
-		local enemies = Workspace:FindFirstChild("Enemies")
-		if not enemies then return 0, nil end
-
-		local aliveNearIsland = 0
-		local nearestMob = nil
-		local nearestDist = math.huge
-
-		for _, m in ipairs(enemies:GetChildren()) do
-			if m:IsA("Model") and not Players:GetPlayerFromCharacter(m) then
-				local eHum = m:FindFirstChildOfClass("Humanoid")
-				local eRoot = KX.getModelRoot(m)
-				if eHum and eRoot and eHum.Health > 0 then
-					local d = (eRoot.Position - hrp.Position).Magnitude
-					if d <= 2200 then
-						if KX.raidKillAura then
-							pcall(function()
-								eRoot.CanCollide = false
-								eRoot.AssemblyLinearVelocity = Vector3.zero
-								eHum.WalkSpeed = 0
-								eHum.JumpPower = 0
-								eHum.Health = 0
-							end)
-						end
-						if d <= 950 and eHum.Health > 0 then
-							aliveNearIsland = aliveNearIsland + 1
-							if d < nearestDist then
-								nearestDist = d
-								nearestMob = m
-							end
-						end
-					end
-				end
-			end
-		end
-		return aliveNearIsland, nearestMob
-	end
-
-	local function safeguardHighValueFruitsInBackpack(keepCheapTool)
-		if not CommF_ then return false end
-		local hasUnsafeHighFruit = false
-		for _, cont in ipairs({LocalPlayer.Character, LocalPlayer:FindFirstChild("Backpack")}) do
-			if cont then
-				for _, t in ipairs(cont:GetChildren()) do
-					if isRaidPhysicalFruitTool(t) and t ~= keepCheapTool then
-						local sKey, pr = getPhysicalFruitKeyAndPrice(t)
-						pcall(function()
-							CommF_:InvokeServer("StoreFruit", sKey, t)
-						end)
-						task.wait(0.1)
-						if t.Parent == LocalPlayer.Character or t.Parent == LocalPlayer:FindFirstChild("Backpack") then
-							if (not pr) or pr > 1000000 or not isFruitAllowedForRaidChip(sKey, pr) then
-								hasUnsafeHighFruit = true
-							end
-						end
-					end
-				end
-			end
-		end
-		return not hasUnsafeHighFruit
-	end
-
-	local function unstoreCheapestMax1MFruit()
-		if not CommF_ then return nil end
-
-		-- 1) Check if an allowed <= 1M physical fruit is ALREADY in Backpack/Character (cheapest first)
-		local bestHeld, bestHeldPrice = nil, math.huge
-		for _, cont in ipairs({LocalPlayer:FindFirstChild("Backpack"), LocalPlayer.Character}) do
-			if cont then
-				for _, t in ipairs(cont:GetChildren()) do
-					if isRaidPhysicalFruitTool(t) then
-						local sKey, pr = getPhysicalFruitKeyAndPrice(t)
-						if isFruitAllowedForRaidChip(sKey, pr) and pr < bestHeldPrice then
-							bestHeldPrice = pr
-							bestHeld = t
-						end
-					end
-				end
-			end
-		end
-		if bestHeld then
-			KX.protectedTool = bestHeld
-			return bestHeld
-		end
-
-		-- 2) Refresh live ItemReplicationService stored fruits & pick the single cheapest <= 1,000,000 fruit!
-		KX.scanPlayerState(true)
-		local pMap = getRaidFruitPriceMap()
-		local candidates = {}
-		for _, entry in ipairs(RAID_MAX_1M_FRUITS) do
-			local pr = pMap[entry.key] or entry.price
-			local qty = tonumber(KX.storedFruitsMap[entry.key]) or 0
-			if qty > 0 and isFruitAllowedForRaidChip(entry.key, pr) then
-				table.insert(candidates, {key = entry.key, price = pr})
-			end
-		end
-		-- Also catch any custom/renamed fruit in storedFruitsMap whose verified price <= 1,000,000
-		for sKey, qty in pairs(KX.storedFruitsMap or {}) do
-			if (tonumber(qty) or 0) > 0 then
-				local pr = pMap[sKey]
-				if pr and isFruitAllowedForRaidChip(sKey, pr) then
-					local seen = false
-					for _, c in ipairs(candidates) do
-						if c.key == sKey then seen = true; break end
-					end
-					if not seen then
-						table.insert(candidates, {key = sKey, price = pr})
-					end
-				end
-			end
-		end
-
-		table.sort(candidates, function(a, b)
-			if a.price ~= b.price then return a.price < b.price end
-			return a.key < b.key
-		end)
-
-		for _, chosen in ipairs(candidates) do
-			pcall(function()
-				local ch = LocalPlayer.Character
-				local busy = ch and ch:FindFirstChild("Busy")
-				if busy and busy:IsA("BoolValue") then
-					busy.Value = false
-				end
-				if GlobalModule and type(GlobalModule) == "table" then
-					GlobalModule.equipTimer = 0
-				end
-				CommF_:InvokeServer("LoadFruit", chosen.key)
-			end)
-			task.wait(0.25)
-
-			for _, cont in ipairs({LocalPlayer:FindFirstChild("Backpack"), LocalPlayer.Character}) do
-				if cont then
-					for _, t in ipairs(cont:GetChildren()) do
-						if isRaidPhysicalFruitTool(t) then
-							local sKey, pr = getPhysicalFruitKeyAndPrice(t)
-							if isFruitAllowedForRaidChip(sKey, pr) then
-								KX.protectedTool = t
-								return t
-							end
-						end
-					end
-				end
-			end
-		end
-		return nil
-	end
-
-	local wasInRaid = false
-	local raidEnteredClock = 0
-	local raidIslandIdx = 1
-	local lastRaidIslandPos = nil
-	local islandClearClock = 0
-	local postRaidAwakenUntil = 0
-	local lastAwakenTryClock = 0
-	local raidBeliCooldownUntil = 0
-	local raidRetryCooldownUntil = 0
-	local lastChipBuyAttempt = 0
-	local lastCapsuleClickClock = 0
-	local capsuleArriveClock = 0
-
-	function KX.tryStepAutoRaid(hrp, hum)
-		local needFrags = KX.calcNeededFragments()
-		local lowFruitsAvail = KX.countAvailableMax1MFruits()
-		local inRaid = KX.isPlayerInRaid(hrp)
-
-		-- 1) INSIDE ACTIVE RAID: KILL AURA + ADVANCE ISLANDS 1 -> 2 -> 3 -> 4 -> 5
-		if inRaid then
-			KX.inActiveRaid = true
-			if not wasInRaid then
-				wasInRaid = true
-				raidEnteredClock = os.clock()
-				raidIslandIdx = 1
-				lastRaidIslandPos = hrp.Position
-				islandClearClock = 0
-				capsuleArriveClock = 0
-				KX.protectedTool = nil
-			end
-
-			KX.raidIslandNum = raidIslandIdx
-			KX.phaseText = string.format("Auto Raid: Isla %d/5 (💎 %d)", raidIslandIdx, KX.fragments)
-
-			local aliveCount, survivorMob = KX.runRaidKillAura(hrp)
-
-			-- Update island index forward if enemies or islands progressed ahead in our Raid lane
-			if survivorMob then
-				local mRoot = KX.getModelRoot(survivorMob)
-				if mRoot then
-					for k = raidIslandIdx, 5 do
-						local iPart, iDist = KX.findRaidIslandPart(k, mRoot.Position)
-						if iPart and iDist < 850 and k > raidIslandIdx then
-							raidIslandIdx = k
-							KX.raidIslandNum = k
-							lastRaidIslandPos = iPart.Position
-						end
-					end
-				end
-			end
-
-			local refPos = lastRaidIslandPos or hrp.Position
-			local islPart = KX.findRaidIslandPart(raidIslandIdx, refPos)
-			if not islPart then
-				for k = 5, 1, -1 do
-					local p, d = KX.findRaidIslandPart(k, hrp.Position)
-					if p and d < 2400 then
-						raidIslandIdx = k
-						KX.raidIslandNum = k
-						islPart = p
-						break
-					end
-				end
-			end
-			if islPart then
-				lastRaidIslandPos = islPart.Position
-			end
-
-			-- If any enemy survived initial Kill Aura tick (e.g. Island 5 Boss / ownership transfer), engage directly + Kill Aura!
-			if survivorMob and KX.isModelAlive(survivorMob) then
-				islandClearClock = 0
-				KX.engageTarget(
-					survivorMob,
-					nil,
-					string.format("⚡ Raid Kill Aura [Isla %d/5]", raidIslandIdx),
-					"Melee"
-				)
-				return true
-			end
-
-			-- Advance to Next Island (1 -> 2 -> 3 -> 4 -> 5) once current island waves are clear!
-			if islandClearClock > 0
-				and (os.clock() - islandClearClock >= 3.0)
-				and (os.clock() - raidEnteredClock >= 5.0)
-				and raidIslandIdx < 5 then
-				local nextPart, nextDist = KX.findRaidIslandPart(raidIslandIdx + 1, lastRaidIslandPos or hrp.Position)
-				if nextPart and nextDist < 2200 then
-					raidIslandIdx = raidIslandIdx + 1
-					KX.raidIslandNum = raidIslandIdx
-					lastRaidIslandPos = nextPart.Position
-					islandClearClock = 0
-					islPart = nextPart
-				end
-			end
-
-			if islPart then
-				local hoverPos = islPart.Position + Vector3.new(0, 32, 0)
-				setStatus(
-					string.format("⚡ Raid [Isla %d/5]: Kill Aura activo • Avanzando islas...", raidIslandIdx),
-					KX.phaseText
-				)
-				local reached = KX.moveToCFrame(CFrame.new(hoverPos))
-				if (reached or (hrp.Position - hoverPos).Magnitude <= 70) and aliveCount == 0 then
-					if islandClearClock == 0 then
-						islandClearClock = os.clock()
-					end
-				end
-			else
-				setStatus("⚡ Raid activa: Cargando siguiente isla...", KX.phaseText)
-			end
-			return true
-		end
-
-		KX.inActiveRaid = false
-		KX.raidIslandNum = 0
-
-		-- 2) POST-RAID AWAKENING ROOM HANDLER (Awaken move if applicable & teleport back out)
-		if wasInRaid then
-			wasInRaid = false
-			raidEnteredClock = 0
-			raidIslandIdx = 1
-			lastRaidIslandPos = nil
-			islandClearClock = 0
-			postRaidAwakenUntil = os.clock() + 4.5
-			KX.scanPlayerState(true)
-		end
-
-		local inAwk = isInAwakeningRoom(hrp)
-		if os.clock() < postRaidAwakenUntil or inAwk then
-			if KX.autoAwakeRaidFruit and CommF_ and (os.clock() - lastAwakenTryClock >= 1.5) then
-				lastAwakenTryClock = os.clock()
-				pcall(function()
-					local chk = CommF_:InvokeServer("Awakener", "Check")
-					if chk ~= nil and chk ~= false then
-						CommF_:InvokeServer("Awakener", "Awaken")
-					end
-				end)
-			end
-			if inAwk and CommF_ and os.clock() >= (postRaidAwakenUntil - 1.5) then
-				pcall(function() CommF_:InvokeServer("Awakener", "Teleport") end)
-				setStatus("✨ Raid finalizada! Saliendo de Awakening Room...", "Auto Raid")
-				return true
-			elseif os.clock() < postRaidAwakenUntil then
-				setStatus("✨ ¡Raid completada (+Fragmentos)! Verificando despertar...", "Auto Raid")
-				return true
-			end
-		end
-
-		-- 3) CHECK IF KAITUN SHOULD START A NEW RAID (PRIORITY OVER LEVEL FARM!)
-		if not KX.autoRaid or KX.level < 1100 then
-			return false
-		end
-
-		local chipTool = KX.hasToolAnywhere("Special Microchip")
-		if not chipTool then
-			if os.clock() < raidRetryCooldownUntil then
-				return false
-			end
-			local wantsFragments = (KX.raidMode == "Always") or (KX.fragments < needFrags)
-			if not wantsFragments then
-				return false
-			end
-			local canTryBeli = (KX.beli >= 100000) and (os.clock() >= raidBeliCooldownUntil)
-			if not canTryBeli and lowFruitsAvail <= 0 then
-				-- Out of <= 1M fruits and 2h Beli chip on cooldown -> seamlessly resume Level Farm!
-				return false
-			end
-		end
-
-		-- Must be in Sea 2 or Sea 3 to use Raid Lab ("vaya pasando los mundos")
-		if KX.worldNum == 1 then
-			local destSea = (KX.level >= 1500 and KX.questsDone.ripIndraSea2) and 3 or 2
-			KX.travelToSea(destSea)
-			return true
-		end
-
-		local raidName = KX.getEffectiveRaidName()
-		KX.phaseText = string.format("Auto Raid [%s] (💎 %d / %d)", raidName, KX.fragments, math.max(KX.fragments, needFrags))
-
-		-- Locate RaidSummon2 Lab in Sea 2 (CircleIsland) or Sea 3 (Boat Castle)
-		local map = Workspace:FindFirstChild("Map")
-		local raidSummon2 = nil
-		if KX.worldNum == 2 then
-			local ci = map and map:FindFirstChild("CircleIsland")
-			raidSummon2 = ci and ci:FindFirstChild("RaidSummon2")
-		else
-			local bc = map and map:FindFirstChild("Boat Castle")
-			raidSummon2 = bc and bc:FindFirstChild("RaidSummon2")
-		end
-		if not raidSummon2 and map then
-			raidSummon2 = map:FindFirstChild("RaidSummon2", true)
-		end
-
-		local btnMain = raidSummon2 and raidSummon2:FindFirstChild("Button") and raidSummon2.Button:FindFirstChild("Main")
-		local cd = btnMain and btnMain:FindFirstChildOfClass("ClickDetector")
-		local podPart = raidSummon2 and raidSummon2:FindFirstChild("Raid1") and raidSummon2.Raid1:FindFirstChild("Color")
-		local labPos = (btnMain and btnMain:IsA("BasePart") and btnMain.Position)
-			or ((KX.worldNum == 2) and Vector3.new(-6528.17, 306.51, -4670.70) or Vector3.new(-5017.5, 314.8, -2825.4))
-
-		-- Travel to Safe Raid Lab FIRST before unstoring any fruit so zero risk of losing fruit/chip!
-		if (hrp.Position - labPos).Magnitude > 30 then
-			setStatus(string.format("⚡ Auto Raid [%s]: Yendo al Laboratorio de Raids (Sea %d)...", raidName, KX.worldNum), KX.phaseText)
-			KX.moveToCFrame(CFrame.new(labPos + Vector3.new(0, 3, 0)))
-			return true
-		end
-
-		-- Inside Safe Raid Lab: Obtain "Special Microchip" (tries 100k Beli first, then cheapest <= 1M fruit!)
-		if not chipTool then
-			capsuleArriveClock = 0
-			if os.clock() - lastChipBuyAttempt < 2.2 then
-				return true
-			end
-			lastChipBuyAttempt = os.clock()
-
-			-- Attempt A: Free 2h 100,000 Beli Microchip (safeguarding any > 1M fruits first!)
-			if KX.beli >= 100000 and os.clock() >= raidBeliCooldownUntil then
-				if safeguardHighValueFruitsInBackpack(nil) then
-					setStatus(string.format("⚡ Auto Raid [%s]: Comprando Microchip (100k Beli)...", raidName), KX.phaseText)
-					pcall(function()
-						CommF_:InvokeServer("RaidsNpc", "Select", raidName)
-					end)
-					task.wait(0.25)
-					chipTool = KX.hasToolAnywhere("Special Microchip")
-					if not chipTool then
-						raidBeliCooldownUntil = os.clock() + 300.0
-					end
-				end
-			end
-
-			-- Attempt B: Unstore SINGLE cheapest <= 1,000,000 Beli fruit & trade for Microchip!
-			if not chipTool then
-				local cheapTool = unstoreCheapestMax1MFruit()
-				if cheapTool then
-					if safeguardHighValueFruitsInBackpack(cheapTool) then
-						setStatus(string.format("⚡ Auto Raid [%s]: Canjeando %s (<= 1M) por Microchip...", raidName, tostring(cheapTool.Name)), KX.phaseText)
-						pcall(function()
-							CommF_:InvokeServer("RaidsNpc", "Select", raidName)
-						end)
-						task.wait(0.3)
-						chipTool = KX.hasToolAnywhere("Special Microchip")
-					end
-				end
-			end
-
-			if chipTool then
-				KX.protectedTool = nil
-			else
-				-- Neither Beli nor <= 1M fruit produced a Microchip -> cool down 3m & let Kaitun farm Levels!
-				KX.protectedTool = nil
-				raidRetryCooldownUntil = os.clock() + 180.0
-				return false
-			end
-		end
-
-		-- Holding "Special Microchip" right at RaidSummon2 -> Unequip tools & press Raid button!
-		local targetStandPos = labPos + Vector3.new(0, 3, 0)
-		if capsuleArriveClock > 0 and (os.clock() - capsuleArriveClock > 4.0) and podPart and podPart:IsA("BasePart") then
-			targetStandPos = podPart.Position + Vector3.new(0, 3, 0)
-		end
-
-		setStatus(string.format("⚡ Auto Raid [%s]: Activando cápsula de Raid...", raidName), KX.phaseText)
-		KX.moveToCFrame(CFrame.new(targetStandPos))
-
-		if capsuleArriveClock == 0 then
-			capsuleArriveClock = os.clock()
-		end
-		pcall(function() hum:UnequipTools() end)
-		if cd and fireclickdetector and (os.clock() - lastCapsuleClickClock >= 1.3) then
-			lastCapsuleClickClock = os.clock()
-			pcall(function() fireclickdetector(cd) end)
-		end
-
-		if KX.smartServerHop and (os.clock() - capsuleArriveClock > 16.0) then
-			capsuleArriveClock = 0
-			KX.serverHop("Cápsulas de Raid ocupadas")
-		end
-		return true
-	end
-
-	-- =========================================================================
 	-- MASTER KAITUN SINGLE-BUTTON STEP DISPATCHER
 	-- =========================================================================
 	function KX.stepMasterKaitun()
 		if not KX.autoFarm then
 			KX.ridingMirageBoat = false
-			KX.inActiveRaid = false
 			return
 		end
 
@@ -4628,18 +4497,21 @@ do
 		KX.stepFruitSpinStoreAndEat()
 		KX.stepSmartStats()
 
-		-- TIER 0.5: If ALREADY inside an active Dungeon Raid, finish Islands 1->5 FIRST!
-		if KX.isPlayerInRaid(hrp) then
-			KX.tryStepAutoRaid(hrp, hum)
-			return
-		end
-
-		-- TIER 1: Priority Raid / World Bosses (Katakuri V2, Rip Indra, Cake Prince, Soul Reaper, Darkbeard)
+		-- TIER 1: Priority Raid / World Bosses (Interrupts leveling whenever active or summonable!)
 		if KX.tryStepPriorityBosses(hrp) then
 			return
 		end
 
-		-- TIER 1.5: AUTO RAID (Priority OVER Level Farm! Uses <= 1M fruits + Kill Aura for Style/Soul Guitar Fragments)
+		-- WORLD ADVANCEMENT PRIORITY: Advance Sea 1 -> Sea 2 (Lv 700+) and Sea 2 -> Sea 3 (Lv 1500+ once unlocked)
+		if KX.worldNum == 1 and KX.level >= 700 then
+			KX.stepSea1ToSea2Quest(hrp)
+			return
+		elseif KX.worldNum == 2 and KX.level >= 1500 and KX.questsDone.ripIndraSea2 then
+			KX.travelToSea(3)
+			return
+		end
+
+		-- TIER 1.5: Priority Auto Dungeon Raid over Level Farm (Fruits <= 1M Beli • Kill Aura Islas 1-3 + Melee)
 		if KX.tryStepAutoRaid(hrp, hum) then
 			return
 		end
@@ -5395,11 +5267,10 @@ do
 	local LblCocoa = addInfoTextRow(BoxInfo, "🍫 Conjured Cocoa : 0", 5)
 	local LblAlucard = addInfoTextRow(BoxInfo, "🩸 Alucard Frag : 0/6", 6)
 	local LblValkyrie = addInfoTextRow(BoxInfo, "🪖 Valkyrie Helm : No", 7)
-	local LblRaidInfo = addInfoTextRow(BoxInfo, "⚡ Auto Raid : Ready (<=1M: 0)", 8)
-	local LblCurrency = addInfoTextRow(BoxInfo, "💰 Beli : 0  |  💎 Frag : 0", 9)
+	local LblCurrency = addInfoTextRow(BoxInfo, "💰 Beli : 0  |  💎 Frag : 0", 8)
 
-	-- RIGHT 1: ⚔️ Farming (THE 1-CLICK KAITUN BUTTON!)
-	local BoxFarming = createFieldsetBox(GenRight, "⚔️ Farming", 1)
+	-- RIGHT 1: ⚔️ Farming (THE 1-CLICK KAITUN BUTTON + AUTO RAID PRIORITY!)
+	local BoxFarming = createFieldsetBox(GenRight, "⚔️ Farming & Auto Raid", 1)
 	local setAutoFarmUI
 	setAutoFarmUI = addPurpleCheckbox(BoxFarming, "⚡ Auto Farm (All-In-One Kaitun)", KX.autoFarm, 1, function(enabled)
 		KX.autoFarm = enabled
@@ -5413,9 +5284,20 @@ do
 		end
 		saveConfig()
 	end)
-	local LblFarmStatus = addInfoTextRow(BoxFarming, "📡 Status : " .. tostring(KX.statusText), 2)
-	local LblFarmPhase = addInfoTextRow(BoxFarming, "🧭 Phase : " .. tostring(KX.phaseText), 3)
+	addPurpleCheckbox(BoxFarming, "🔥 Auto Raid (Prioridad Frutas <=1M)", KX.autoRaid, 2, function(v)
+		KX.autoRaid = v
+		KX.raidCooldownUntil = 0
+		saveConfig()
+	end)
+	addPurpleCheckbox(BoxFarming, "💥 Kill Aura Raid (Islas 1-3 + Melé)", KX.raidKillAuraUpTo3, 3, function(v)
+		KX.raidKillAuraUpTo3 = v
+		saveConfig()
+	end)
+	local LblFarmStatus = addInfoTextRow(BoxFarming, "📡 Status : " .. tostring(KX.statusText), 4)
+	local LblFarmPhase = addInfoTextRow(BoxFarming, "🧭 Phase : " .. tostring(KX.phaseText), 5)
 	LblFarmPhase.TextColor3 = THEME.TextSecondary
+	local LblRaidInfo = addInfoTextRow(BoxFarming, "⚡ Raid : " .. tostring(KX.lastRaidStatus), 6)
+	LblRaidInfo.TextColor3 = THEME.AccentBright
 
 	-- RIGHT 2: 🗡️ Sword (All 18 Swords + Live Mastery)
 	local BoxSword = createFieldsetBox(GenRight, "🗡️ Sword", 2)
@@ -5534,61 +5416,18 @@ do
 		KX.smartServerHop = v; saveConfig()
 	end)
 
-	local BoxRaidCfg = createFieldsetBox(SetLeft, "⚡ Auto Raid (Fragmentos & Kill Aura)", 2)
-	addPurpleCheckbox(BoxRaidCfg, "⚡ Auto Raid (Prioridad sobre Farm Lv)", KX.autoRaid, 1, function(v)
-		KX.autoRaid = v; saveConfig()
-	end)
-	addPurpleCheckbox(BoxRaidCfg, "💀 Raid Kill Aura (Instant Wave Clear)", KX.raidKillAura, 2, function(v)
-		KX.raidKillAura = v; saveConfig()
-	end)
-	addPurpleCheckbox(BoxRaidCfg, "✨ Auto Awaken Fruit (Al terminar Raid)", KX.autoAwakeRaidFruit, 3, function(v)
-		KX.autoAwakeRaidFruit = v; saveConfig()
-	end)
-
-	local function getRaidModeLabel()
-		if KX.raidMode == "Always" then
-			return "🎯 Modo : ♾️ Siempre (Frutas <=1M) [Click]"
-		end
-		return "🎯 Modo : 🧠 Smart (Melés + Soul Guitar) [Click]"
-	end
-
-	local RaidModeBtn = Instance.new("TextButton")
-	RaidModeBtn.Size = UDim2.new(1, 0, 0, 24)
-	RaidModeBtn.BackgroundColor3 = THEME.CheckBg
-	RaidModeBtn.BorderSizePixel = 0
-	RaidModeBtn.LayoutOrder = 4
-	RaidModeBtn.Font = Enum.Font.RobotoMono
-	RaidModeBtn.TextSize = 11
-	RaidModeBtn.TextColor3 = THEME.AccentBright
-	RaidModeBtn.Text = getRaidModeLabel()
-	RaidModeBtn.ZIndex = 4
-	RaidModeBtn.Parent = BoxRaidCfg
-	local rmCorner = Instance.new("UICorner")
-	rmCorner.CornerRadius = UDim.new(0, 4)
-	rmCorner.Parent = RaidModeBtn
-	local rmStroke = Instance.new("UIStroke")
-	rmStroke.Color = THEME.BorderBox
-	rmStroke.Thickness = 1
-	rmStroke.Parent = RaidModeBtn
-
-	connect(RaidModeBtn.MouseButton1Click, function()
-		KX.raidMode = (KX.raidMode == "Smart") and "Always" or "Smart"
-		RaidModeBtn.Text = getRaidModeLabel()
-		saveConfig()
-	end)
-
-	local RAID_CHIP_CYCLE = {"Auto", "Flame", "Ice", "Light", "Magma", "Buddha", "Dark", "Sand", "Spider", "Quake"}
+	local RAID_CHIP_CYCLE = {"Auto", "Flame", "Ice", "Light", "Magma", "Buddha", "Dark"}
 	local RaidChipBtn = Instance.new("TextButton")
 	RaidChipBtn.Size = UDim2.new(1, 0, 0, 24)
 	RaidChipBtn.BackgroundColor3 = THEME.CheckBg
 	RaidChipBtn.BorderSizePixel = 0
-	RaidChipBtn.LayoutOrder = 5
+	RaidChipBtn.LayoutOrder = 10
 	RaidChipBtn.Font = Enum.Font.RobotoMono
 	RaidChipBtn.TextSize = 11
 	RaidChipBtn.TextColor3 = THEME.AccentBright
-	RaidChipBtn.Text = "🧪 Chip Raid : " .. tostring(KX.selectedRaid or "Auto") .. " (Fruta <=1M) [Click]"
+	RaidChipBtn.Text = "🔥 Raid Chip : " .. tostring(KX.selectedRaidType) .. " [Click]"
 	RaidChipBtn.ZIndex = 4
-	RaidChipBtn.Parent = BoxRaidCfg
+	RaidChipBtn.Parent = BoxCoreCfg
 	local rcCorner = Instance.new("UICorner")
 	rcCorner.CornerRadius = UDim.new(0, 4)
 	rcCorner.Parent = RaidChipBtn
@@ -5598,19 +5437,19 @@ do
 	rcStroke.Parent = RaidChipBtn
 
 	connect(RaidChipBtn.MouseButton1Click, function()
-		local idx = 1
-		for i, name in ipairs(RAID_CHIP_CYCLE) do
-			if name == KX.selectedRaid then
-				idx = i
+		local curIdx = 1
+		for i, n in ipairs(RAID_CHIP_CYCLE) do
+			if n == KX.selectedRaidType then
+				curIdx = i
 				break
 			end
 		end
-		KX.selectedRaid = RAID_CHIP_CYCLE[(idx % #RAID_CHIP_CYCLE) + 1]
-		RaidChipBtn.Text = "🧪 Chip Raid : " .. tostring(KX.selectedRaid) .. " (Fruta <=1M) [Click]"
+		KX.selectedRaidType = RAID_CHIP_CYCLE[(curIdx % #RAID_CHIP_CYCLE) + 1]
+		RaidChipBtn.Text = "🔥 Raid Chip : " .. tostring(KX.selectedRaidType) .. " [Click]"
 		saveConfig()
 	end)
 
-	local BoxPerf = createFieldsetBox(SetLeft, "🚀 Performance & AFK", 3)
+	local BoxPerf = createFieldsetBox(SetLeft, "🚀 Performance & AFK", 2)
 	addPurpleCheckbox(BoxPerf, "💨 FPS Boost (Low GPU/CPU)", KX.fpsBoost, 1, function(v)
 		KX.applyFpsBoost(v); saveConfig()
 	end)
@@ -5724,6 +5563,11 @@ do
 
 				LblFarmStatus.Text = "📡 Status : " .. tostring(KX.statusText)
 				LblFarmPhase.Text = "🧭 Phase : " .. tostring(KX.phaseText)
+				LblRaidInfo.Text = string.format(
+					"⚡ Raid [%s] : %s",
+					tostring(KX.getPreferredRaidChipName()),
+					tostring(KX.lastRaidStatus or "Standby")
+				)
 
 				-- Update Active Real-Time Melee + EXP Card
 				if KX.currentMeleeCanon ~= "None" then
@@ -5808,20 +5652,6 @@ do
 				LblCocoa.Text = "🍫 Conjured Cocoa : " .. tostring(KX.materials["Conjured Cocoa"] or 0)
 				LblAlucard.Text = "🩸 Alucard Frag : " .. tostring(KX.materials["Alucard Fragment"] or 0) .. "/6"
 				LblValkyrie.Text = "🪖 Valkyrie Helm : " .. (KX.ownedAccessories["Valkyrie Helm"] and "✅ Yes" or "No")
-				if KX.inActiveRaid then
-					LblRaidInfo.Text = string.format("⚡ EN RAID : Isla %d/5 • 💀 Kill Aura ON", math.max(1, KX.raidIslandNum or 1))
-					LblRaidInfo.TextColor3 = THEME.GreenOk
-				else
-					local needF = KX.calcNeededFragments()
-					local lowF = KX.countAvailableMax1MFruits()
-					LblRaidInfo.Text = string.format(
-						"⚡ Raid : %s | 🍎<=1M: %d | 🎯Frag: %s",
-						KX.autoRaid and "ON" or "OFF",
-						lowF,
-						formatCompact(needF)
-					)
-					LblRaidInfo.TextColor3 = KX.autoRaid and THEME.AccentBright or THEME.TextSecondary
-				end
 				LblCurrency.Text = string.format("💰 Beli : %s  |  💎 Frag : %s", formatCompact(KX.beli), formatCompact(KX.fragments))
 			end)
 			task.wait(0.35)
@@ -5885,23 +5715,6 @@ task.spawn(function()
 	while isAlive() do
 		pcall(function() KX.scanPlayerState(false) end)
 		task.wait(2.5)
-	end
-end)
-
--- Dedicated Fast Raid Kill Aura Loop (0.15s wave wipe while inside Dungeon Raids)
-task.spawn(function()
-	while isAlive() do
-		if KX.autoFarm and KX.inActiveRaid and KX.raidKillAura then
-			pcall(function()
-				local hrp = KX.getRootAndHum()
-				if hrp then
-					KX.runRaidKillAura(hrp)
-				end
-			end)
-			task.wait(0.15)
-		else
-			task.wait(0.35)
-		end
 	end
 end)
 
