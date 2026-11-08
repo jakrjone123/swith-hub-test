@@ -2682,6 +2682,7 @@ do
 	local lastRaidChipBuyClock = 0
 	local lastRaidFruitLoadClock = 0
 	local lastRaidBtnClickClock = 0
+	local lastRaidPortalClock = 0
 	local postRaidAwakenUntil = 0
 	local lastAwakenTryClock = 0
 	local lastKillAuraPulseClock = 0
@@ -3183,8 +3184,8 @@ do
 			local ci = map and map:FindFirstChild("CircleIsland")
 			raidSummon2 = ci and ci:FindFirstChild("RaidSummon2")
 		else
-			local bc = map and (map:FindFirstChild("Boat Castle") or map:FindFirstChild("Castle"))
-			raidSummon2 = (bc and bc:FindFirstChild("RaidSummon2", true)) or (map and map:FindFirstChild("RaidSummon2", true))
+			local bc = map and map:FindFirstChild("Boat Castle")
+			raidSummon2 = bc and bc:FindFirstChild("RaidSummon2")
 		end
 
 		local btnMain = raidSummon2 and raidSummon2:FindFirstChild("Button") and raidSummon2.Button:FindFirstChild("Main")
@@ -3194,8 +3195,8 @@ do
 			or ((KX.worldNum == 2) and Vector3.new(-6528.17, 306.51, -4670.70) or Vector3.new(-5017.5, 314.8, -2825.4))
 
 		-- Fast Sea 3 Castle on the Sea portal shortcut if far from RaidSummon2
-		if KX.worldNum == 3 and (hrp.Position - btnPos).Magnitude > 1200 and CommF_ and (os.clock() - lastPortalClock >= 3.5) then
-			lastPortalClock = os.clock()
+		if KX.worldNum == 3 and (hrp.Position - btnPos).Magnitude > 1200 and CommF_ and (os.clock() - lastRaidPortalClock >= 3.5) then
+			lastRaidPortalClock = os.clock()
 			KX.stopTween()
 			pcall(function()
 				CommF_:InvokeServer("requestEntrance", Vector3.new(-5075.5, 314.5, -3150.0))
@@ -5758,7 +5759,10 @@ task.spawn(function()
 	end
 	while isAlive() do
 		if KX.autoFarm then
-			pcall(KX.stepMasterKaitun)
+			local okStep, errStep = pcall(KX.stepMasterKaitun)
+			if not okStep then
+				warn("[SwitchHub Kaitun Step Error]", errStep)
+			end
 			task.wait(0.22)
 		else
 			task.wait(0.45)
