@@ -3335,6 +3335,11 @@ do
 		if reached or (hrp.Position - btnPos).Magnitude <= 28 then
 			if summonArriveClock == 0 then
 				summonArriveClock = os.clock()
+				if CommF_ then
+					task.spawn(function()
+						pcall(function() CommF_:InvokeServer("SetSpawnPoint") end)
+					end)
+				end
 			end
 			pcall(function() hum:UnequipTools() end)
 			if cd and fireclickdetector and (os.clock() - lastRaidBtnClickClock >= 1.3) then
