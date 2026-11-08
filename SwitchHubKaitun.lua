@@ -124,10 +124,11 @@ local KX = {
 	spawnedAtClock = os.clock(),
 
 	-- Master 1-Click Kaitun Switch
+	startupReady = false,
 	autoFarm = false,
 	preferredTeam = "Pirates",
-	statusText = "Idle (Ready)",
-	phaseText = "Standby",
+	statusText = "⏳ Cargando opciones y módulos (5s)...",
+	phaseText = "Inicializando Switch Hub...",
 
 	-- Settings (⚙️ Tab)
 	autoSpinAndStoreFruits = true,
@@ -156,7 +157,7 @@ local KX = {
 	bringMobs = true, -- High-frequency cluster Bring Mob (up to 10 mobs within 340 studs)
 	sea1SkyPriorityFarm = true, -- Sea 1 Only: Farm high-level Sky NPCs (+ Quest) until Lv. 625, then Fountain City (last island)
 	noAttackAnimation = true, -- Removes character M1 swing/hit animation & lunge
-	fpsBoost = false,
+	fpsBoost = true, -- Active by default on startup (Low GPU/CPU)
 	afkMode = false,
 
 	-- Redeemed / Expired 2x EXP Codes Persistence
@@ -384,6 +385,8 @@ local function loadConfig()
 	end)
 end
 loadConfig()
+-- Ensure FPS Booster starts 100% active by default on every launch
+KX.fpsBoost = true
 
 --------------------------------------------------------------------------------
 -- 3. REMOTES, SEA DETECTION & LAZY GAME MODULE INITIALIZER (NO METAMETHODS!)
@@ -1215,11 +1218,10 @@ end
 --------------------------------------------------------------------------------
 do
 	-- Generic distance portals ONLY for open-world Sea 1 & Sea 3 hubs!
+	-- Sea 1 SkyArea2 is handled deterministically by altitude (Y > 3500) so SEA_PORTALS[1] never pulls the player back into lower clouds!
 	-- Sea 2 interiors (Don Swan Room & Cursed Ship) are handled deterministically by interior bounds so they NEVER rubberband!
 	local SEA_PORTALS = {
 		[1] = {
-			Vector3.new(-4651.8, 845.2, -1912.6),  -- Sky 1
-			Vector3.new(-7894.6, 5547.1, -380.2),  -- Sky 2
 			Vector3.new(61163.8, 11.7, 1819.7),    -- Underwater City
 			Vector3.new(3864.6, 6.7, -1926.2),     -- Whirlpool
 		},
@@ -1384,16 +1386,22 @@ do
 		end
 		local ch = LocalPlayer.Character
 		local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+		local hum = ch and ch:FindFirstChildOfClass("Humanoid")
 		if not hrp then return false end
+		pcall(function()
+			if hum and hum.Sit then hum.Sit = false end
+			local busy = ch:FindFirstChild("Busy")
+			if busy and busy:IsA("BoolValue") then busy.Value = false end
+		end)
 		local okE, v1 = pcall(function()
 			return CommF_:InvokeServer("requestEntrance", destVec)
 		end)
-		if okE and typeof(v1) == "Vector3" and LocalPlayer.Character == ch and hrp.Parent then
+		if okE and typeof(v1) == "Vector3" and (v1 - destVec).Magnitude <= 1600 and LocalPlayer.Character == ch and hrp.Parent then
 			KX.stopTween()
 			KX.ensureAntiFall(hrp)
 			hrp.CFrame = CFrame.new(v1)
 			return true
-		elseif hrp.Parent and (hrp.Position - destVec).Magnitude <= 140 then
+		elseif hrp.Parent and (hrp.Position - destVec).Magnitude <= 180 then
 			KX.stopTween()
 			return true
 		end
@@ -1427,28 +1435,26 @@ do
 		local targetPos = targetCF.Position
 
 		-- Deterministic Sea 1 Upper Skylands (SkyArea2) instant portal routing
-		if KX.worldNum == 1 and CommF_ and (os.clock() - lastPortalClock >= 2.2) then
+		if KX.worldNum == 1 and CommF_ and (os.clock() - lastPortalClock >= 2.5) then
 			if targetPos.Y > 3500 and hrp.Position.Y < 3500 then
 				local map = Workspace:FindFirstChild("Map")
 				local sky2 = map and map:FindFirstChild("SkyArea2")
 				local entPt = sky2 and sky2:FindFirstChild("EntrancePoint")
-				local sky2Vec = (entPt and entPt:IsA("BasePart") and entPt.Position) or Vector3.new(-7894.6, 5547.1, -380.2)
+				local sky2Vec = (entPt and entPt:IsA("BasePart") and entPt.Position) or Vector3.new(-5949.1, 5467.9, 2086.5)
 				lastPortalClock = os.clock()
 				if KX.invokeRequestEntrance(sky2Vec) then
-					task.wait(0.15)
-					hrp = KX.getRootAndHum()
-					if not hrp then return false end
+					task.wait(0.28)
+					return false
 				end
 			elseif targetPos.Y < 2000 and hrp.Position.Y > 3500 then
 				local map = Workspace:FindFirstChild("Map")
 				local sky1 = map and map:FindFirstChild("Sky")
 				local exitPt = sky1 and sky1:FindFirstChild("ExitPoint")
-				local sky1Vec = (exitPt and exitPt:IsA("BasePart") and exitPt.Position) or Vector3.new(-4651.8, 845.2, -1912.6)
+				local sky1Vec = (exitPt and exitPt:IsA("BasePart") and exitPt.Position) or Vector3.new(-4248.4, 1102.2, -369.5)
 				lastPortalClock = os.clock()
 				if KX.invokeRequestEntrance(sky1Vec) then
-					task.wait(0.15)
-					hrp = KX.getRootAndHum()
-					if not hrp then return false end
+					task.wait(0.28)
+					return false
 				end
 			end
 		end
@@ -2273,7 +2279,7 @@ do
 		return false
 	end
 
-	local patrolIdx = 1
+		local patrolIdx = 1
 	local lastPatrolSwitch = 0
 	function KX.farmMobSpawns(mobName, spawns, label, weaponCat, exactToolName)
 		local mobSet = {[mobName] = true}
@@ -2283,13 +2289,20 @@ do
 			return
 		end
 		if spawns and #spawns > 0 then
-			if os.clock() - lastPatrolSwitch >= 2.2 then
-				lastPatrolSwitch = os.clock()
-				patrolIdx = (patrolIdx % #spawns) + 1
-			end
 			local sp = spawns[((patrolIdx - 1) % #spawns) + 1]
+			local hoverCF = sp * CFrame.new(0, 22, 0)
 			setStatus(label .. " (Esperando spawn: " .. tostring(mobName) .. ")", KX.phaseText)
-			KX.moveToCFrame(sp * CFrame.new(0, 22, 0))
+			local reached = KX.moveToCFrame(hoverCF)
+			local hrp = KX.getRootAndHum()
+			if reached or (hrp and (hrp.Position - hoverCF.Position).Magnitude <= 35) then
+				if os.clock() - lastPatrolSwitch >= 2.6 then
+					lastPatrolSwitch = os.clock()
+					patrolIdx = (patrolIdx % #spawns) + 1
+				end
+			else
+				-- Lock patrol target while in transit so tween NEVER cancels mid-flight!
+				lastPatrolSwitch = os.clock()
+			end
 		end
 	end
 end
@@ -2492,25 +2505,49 @@ do
 		end)
 	end
 
+	local fpsDescendantConn = nil
+	local function optimizeInstanceForFps(d)
+		if d:IsA("BasePart") then
+			d.Material = Enum.Material.SmoothPlastic
+			d.Reflectance = 0
+			d.CastShadow = false
+		elseif d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Smoke") or d:IsA("Fire") or d:IsA("Sparkles") then
+			d.Enabled = false
+		elseif d:IsA("Decal") or d:IsA("Texture") then
+			d.Transparency = 1
+		end
+	end
+
 	function KX.applyFpsBoost(enable)
 		KX.fpsBoost = (enable == true)
-		if not KX.fpsBoost then return end
+		if not KX.fpsBoost then
+			if fpsDescendantConn then
+				pcall(function() fpsDescendantConn:Disconnect() end)
+				fpsDescendantConn = nil
+			end
+			return
+		end
 		pcall(function()
 			Lighting.GlobalShadows = false
 			Lighting.FogEnd = 9e9
+			Lighting.ShadowSoftness = 0
 			settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
 			for _, v in ipairs(Lighting:GetChildren()) do
-				if v:IsA("PostEffect") or v:IsA("Atmosphere") then
-					v.Enabled = false
+				if v:IsA("PostEffect") or v:IsA("Atmosphere") or v:IsA("Sky") then
+					if v:IsA("PostEffect") or v:IsA("Atmosphere") then
+						v.Enabled = false
+					end
 				end
 			end
 			for _, d in ipairs(Workspace:GetDescendants()) do
-				if d:IsA("BasePart") then
-					d.Material = Enum.Material.SmoothPlastic
-					d.Reflectance = 0
-				elseif d:IsA("ParticleEmitter") or d:IsA("Trail") then
-					d.Enabled = false
-				end
+				optimizeInstanceForFps(d)
+			end
+			if not fpsDescendantConn then
+				fpsDescendantConn = connect(Workspace.DescendantAdded, function(d)
+					if KX.fpsBoost then
+						pcall(optimizeInstanceForFps, d)
+					end
+				end)
 			end
 		end)
 	end
@@ -2887,18 +2924,38 @@ do
 		["Shanda"] = true,
 		["Royal Squad"] = true,
 		["Royal Soldier"] = true,
-		["God's Guard"] = true,
+		["Wysper"] = true,
 	}
 
-	local SEA1_UPPER_SKY_PATROL = {
-		CFrame.new(-7685.0, 5565.0, -490.0),  -- Shanda [Lv. 475] (9 cluster spawns)
-		CFrame.new(-7640.0, 5606.0, -1440.0), -- Royal Squad [Lv. 525]
-		CFrame.new(-7830.0, 5606.0, -1725.0), -- Royal Soldier [Lv. 550]
-		CFrame.new(-7845.0, 5550.0, -440.0),  -- God's Guard [Lv. 450]
+	-- Verified live Sea 1 Upper Skylands (SkyArea2) coordinates (Y ~ 5468 - 5552, Z ~ +963 to +1956)
+	local SEA1_UPPER_SKY_FALLBACK_PATROL = {
+		CFrame.new(-5890.41, 5468.90, 1956.19), -- Shanda [Lv. 475] (Main cluster)
+		CFrame.new(-6706.87, 5551.41, 1155.43), -- Royal Squad [Lv. 525]
+		CFrame.new(-6938.38, 5541.05, 963.78),  -- Royal Soldier [Lv. 550]
 	}
 
 	local skyPatrolIdx = 1
 	local lastSkyPatrolClock = 0
+
+	local function getUpperSkyPatrolPoints()
+		local spMap = KX.getSpawnMap()
+		local pts = {}
+		for _, mName in ipairs({"Shanda", "Royal Squad", "Royal Soldier"}) do
+			local list = spMap and spMap[mName]
+			if list and #list > 0 then
+				for _, cf in ipairs(list) do
+					if cf.Position.Y > 3500 then
+						table.insert(pts, cf)
+						break
+					end
+				end
+			end
+		end
+		if #pts == 0 then
+			return SEA1_UPPER_SKY_FALLBACK_PATROL
+		end
+		return pts
+	end
 
 	function KX.getSea1SkyOrFountainQuestInfo()
 		local spMap = KX.getSpawnMap()
@@ -2906,7 +2963,14 @@ do
 		if GuideModule and GuideModule.Data and GuideModule.Data.NPCList then
 			for _, nd in pairs(GuideModule.Data.NPCList) do
 				if nd.InternalQuestName and nd.Position then
-					npcPosMap[nd.InternalQuestName] = CFrame.new(nd.Position)
+					-- SkyExp1Quest has 2 Mole NPCs (Y=1085 in Lower Cloud vs Y=5468 in Upper SkyArea2); always prefer Upper SkyArea2!
+					if nd.InternalQuestName == "SkyExp1Quest" then
+						if nd.Position.Y > 3500 or not npcPosMap["SkyExp1Quest"] then
+							npcPosMap["SkyExp1Quest"] = CFrame.new(nd.Position)
+						end
+					else
+						npcPosMap[nd.InternalQuestName] = CFrame.new(nd.Position)
+					end
 				end
 			end
 		end
@@ -2919,12 +2983,12 @@ do
 			local qIdx = isCapt and 2 or 1
 			local lReq = isCapt and 650 or 625
 			local npcCF = npcPosMap["FountainQuest"]
-				or CFrame.new(KX.getNPCWorldPos("Freezeburg Quest Giver", Vector3.new(5259.8, 38.5, 4050.1)))
+				or CFrame.new(5263.49, 74.91, 4087.62)
 			local sps = spMap[mName]
 			if not sps or #sps == 0 then
 				sps = isCapt
-					and {CFrame.new(5670.0, 42.0, 4920.0), CFrame.new(5820.0, 42.0, 4850.0)}
-					or {CFrame.new(5550.0, 42.0, 3950.0), CFrame.new(5680.0, 42.0, 4020.0)}
+					and {CFrame.new(5773.73, 77.66, 4703.10), CFrame.new(5684.01, 49.69, 4873.30)}
+					or {CFrame.new(5840.03, 76.83, 3975.56), CFrame.new(5593.77, 45.01, 3969.64)}
 			end
 			return {
 				questGroup = "FountainQuest",
@@ -2941,12 +3005,12 @@ do
 			local qIdx = isSoldier and 2 or 1
 			local lReq = isSoldier and 550 or 525
 			local npcCF = npcPosMap["SkyExp2Quest"]
-				or CFrame.new(KX.getNPCWorldPos("Sky Quest Giver 2", Vector3.new(-7903.4, 5635.9, -1411.5)))
+				or CFrame.new(-7033.10, 5590.57, 1353.11)
 			local sps = spMap[mName]
 			if not sps or #sps == 0 then
 				sps = isSoldier
-					and {CFrame.new(-7830.0, 5606.0, -1725.0), CFrame.new(-7760.0, 5606.0, -1810.0)}
-					or {CFrame.new(-7640.0, 5606.0, -1440.0), CFrame.new(-7710.0, 5606.0, -1510.0)}
+					and {CFrame.new(-6938.38, 5541.05, 963.78)}
+					or {CFrame.new(-6706.87, 5551.41, 1155.43)}
 			end
 			return {
 				questGroup = "SkyExp2Quest",
@@ -2956,19 +3020,16 @@ do
 				spawns = sps,
 				npcCFrame = npcCF,
 			}
-		elseif lvl >= 450 then
-			-- Upper Skylands Temple (SkyExp1Quest: God's Guard Lv. 450 / Shanda Lv. 475)
-			local isShanda = (lvl >= 475)
-			local mName = isShanda and "Shanda" or "God's Guard"
-			local qIdx = isShanda and 2 or 1
-			local lReq = isShanda and 475 or 450
-			local npcCF = npcPosMap["SkyExp1Quest"]
-				or CFrame.new(KX.getNPCWorldPos("Mole", Vector3.new(-7859.1, 5544.5, -381.5)))
+		elseif lvl >= 475 then
+			-- Upper Skylands Temple (SkyExp1Quest idx 2: Shanda Lv. 475 right next to Mole on SkyArea2!)
+			local mName = "Shanda"
+			local qIdx = 2
+			local lReq = 475
+			local npcCF = (npcPosMap["SkyExp1Quest"] and npcPosMap["SkyExp1Quest"].Position.Y > 3500 and npcPosMap["SkyExp1Quest"])
+				or CFrame.new(-5949.07, 5467.94, 2086.52)
 			local sps = spMap[mName]
 			if not sps or #sps == 0 then
-				sps = isShanda
-					and {CFrame.new(-7685.0, 5565.0, -490.0), CFrame.new(-7620.0, 5565.0, -455.0)}
-					or {CFrame.new(-7845.0, 5550.0, -440.0), CFrame.new(-7910.0, 5550.0, -490.0)}
+				sps = {CFrame.new(-5890.41, 5468.90, 1956.19)}
 			end
 			return {
 				questGroup = "SkyExp1Quest",
@@ -3004,8 +3065,8 @@ do
 			return
 		end
 
-		-- 3) Lv. 450 - 624 -> Upper Skylands High-Level NPCs + Sky Mission ("los del cielo y tome la misión")
-		if lvl >= 450 then
+		-- 3) Lv. 475 - 624 -> Upper Skylands High-Level NPCs + Sky Mission ("los del cielo y tome la misión")
+		if lvl >= 475 then
 			local skyQuest = KX.getSea1SkyOrFountainQuestInfo()
 			if skyQuest and KX.ensureQuestAccepted(skyQuest, hrp) then
 				local lbl = customLabel or string.format("☁️ Sea 1 Cielo + Misión [Lv.%d • %s]", lvl, skyQuest.mobName)
@@ -3029,14 +3090,14 @@ do
 			return
 		end
 
-		-- 4) Lv. 10 - 449 -> Upper Skylands High-Level Sky NPC Power-Farm (Shanda / Royal Squad / Royal Soldier / God's Guard)
+		-- 4) Lv. 10 - 474 -> Upper Skylands (SkyArea2) High-Level Sky NPC Power-Farm (Shanda / Royal Squad / Royal Soldier)
 		local hasOldQ = KX.getActiveQuestInfo(nil, nil)
 		if hasOldQ and CommF_ and (os.clock() - lastAbandonClock >= 2.0) then
 			lastAbandonClock = os.clock()
 			pcall(function() CommF_:InvokeServer("AbandonQuest") end)
 		end
 
-		local lbl = customLabel or string.format("☁️ Sea 1 Power-Farm Cielo [Lv.%d -> 450]", lvl)
+		local lbl = customLabel or string.format("☁️ Sea 1 Power-Farm Cielo [Lv.%d -> 475]", lvl)
 
 		-- Prioritize Shanda [Lv. 475] & Royal Squad [Lv. 525] in Upper Skylands (Y > 3500)
 		local bestSkyMob = nil
@@ -3063,13 +3124,20 @@ do
 			return
 		end
 
-		if os.clock() - lastSkyPatrolClock >= 2.4 then
+		local patrolList = getUpperSkyPatrolPoints()
+		local sp = patrolList[((skyPatrolIdx - 1) % #patrolList) + 1]
+		local hoverCF = sp * CFrame.new(0, 20, 0)
+		setStatus(lbl .. " (Viajando al Cielo / Esperando oleada...)", KX.phaseText)
+		local reached = KX.moveToCFrame(hoverCF)
+		if reached or (hrp.Position - hoverCF.Position).Magnitude <= 35 then
+			if os.clock() - lastSkyPatrolClock >= 2.8 then
+				lastSkyPatrolClock = os.clock()
+				skyPatrolIdx = (skyPatrolIdx % #patrolList) + 1
+			end
+		else
+			-- Lock destination while in transit so tween NEVER cancels or oscillates inside the clouds!
 			lastSkyPatrolClock = os.clock()
-			skyPatrolIdx = (skyPatrolIdx % #SEA1_UPPER_SKY_PATROL) + 1
 		end
-		local sp = SEA1_UPPER_SKY_PATROL[((skyPatrolIdx - 1) % #SEA1_UPPER_SKY_PATROL) + 1]
-		setStatus(lbl .. " (Buscando oleada en el Cielo...)", KX.phaseText)
-		KX.moveToCFrame(sp * CFrame.new(0, 20, 0))
 	end
 
 	function KX.stepStandardSeaLevelFarm(hrp, customLabel)
@@ -6020,8 +6088,9 @@ do
 		end)
 	end
 
-	-- Apply persisted FPS Boost / AFK Mode if saved
-	if KX.fpsBoost then task.defer(function() KX.applyFpsBoost(true) end) end
+	-- Apply FPS Boost (Active by Default) & AFK Mode if saved
+	KX.fpsBoost = true
+	task.defer(function() KX.applyFpsBoost(true) end)
 	if KX.afkMode then task.defer(function() KX.applyAfkMode(true) end) end
 
 	-- Keep Choose Team screen uncovered when Auto Farm is OFF at launch!
@@ -6064,7 +6133,11 @@ do
 				-- Instant real-time Melee + Mastery + EXP read on every UI frame!
 				KX.scanRealtimeMeleeAndWeapons()
 
-				if KX.autoFarm then
+				if not KX.startupReady then
+					LblStateBadge.Text = "⏳ CARGANDO..."
+					LblStateBadge.TextColor3 = THEME.AccentBright
+					sbStroke.Color = THEME.AccentBright
+				elseif KX.autoFarm then
 					LblStateBadge.Text = "🟢 KAITUN ON"
 					LblStateBadge.TextColor3 = THEME.GreenOk
 					sbStroke.Color = THEME.GreenOk
@@ -6216,7 +6289,7 @@ connect(RunService.Stepped, function()
 	local hum = ch and ch:FindFirstChildOfClass("Humanoid")
 
 	-- NoClip, Hit Animation Suppression & Infinite Energy while Auto Farm is active
-	if KX.autoFarm and ch then
+	if KX.startupReady and KX.autoFarm and ch then
 		for _, p in ipairs(ch:GetChildren()) do
 			if p:IsA("BasePart") and p.CanCollide then
 				p.CanCollide = false
@@ -6235,7 +6308,7 @@ connect(RunService.Stepped, function()
 	local map = Workspace:FindFirstChild("Map")
 	local wb = map and map:FindFirstChild("WaterBase-Plane")
 	if wb and wb:IsA("BasePart") then
-		if KX.autoFarm and hum and hum.SeatPart == nil then
+		if KX.startupReady and KX.autoFarm and hum and hum.SeatPart == nil then
 			wb.Size = Vector3.new(wb.Size.X, 112, wb.Size.Z)
 		else
 			wb.Size = Vector3.new(wb.Size.X, 80, wb.Size.Z)
@@ -6246,7 +6319,9 @@ end)
 -- Live Inventory & Quest Scanner Loop
 task.spawn(function()
 	while isAlive() do
-		pcall(function() KX.scanPlayerState(false) end)
+		if KX.startupReady then
+			pcall(function() KX.scanPlayerState(false) end)
+		end
 		task.wait(2.5)
 	end
 end)
@@ -6254,7 +6329,7 @@ end)
 -- High-Frequency Ultra Fast-Click + Bring-Mob Combat Loop (~24 ticks/sec + multi-target burst)
 task.spawn(function()
 	while isAlive() do
-		if KX.autoFarm and KX.lastAimEnemy then
+		if KX.startupReady and KX.autoFarm and KX.lastAimEnemy then
 			pcall(function()
 				local enemy = KX.lastAimEnemy
 				if enemy and KX.isModelAlive(enemy) then
@@ -6289,13 +6364,49 @@ task.spawn(function()
 	end
 end)
 
--- Master Kaitun 1-Click Engine Loop
+-- Master Kaitun 1-Click Engine Loop (with 5-Second Progressive Option & Module Warmup)
 task.spawn(function()
-	if not isChooseTeamScreenOpen() and LocalPlayer.Character then
-		task.wait(0.6)
-		KX.ensureModulesReady(false)
-		pcall(function() KX.scanPlayerState(true) end)
+	-- Progressive 4.8s (max 5s) initialization so all UI options, Data, Remotes, and Modules load cleanly
+	setStatus("⏳ Cargando opciones y FPS Booster... (5s)", "Inicializando Switch Hub (1/5)")
+	pcall(function() KX.applyFpsBoost(true) end)
+	task.wait(1.0)
+	if not isAlive() then return end
+
+	setStatus("⏳ Conectando remotos y módulos... (4s)", "Inicializando Switch Hub (2/5)")
+	pcall(function()
+		if not isChooseTeamScreenOpen() and LocalPlayer.Character then
+			KX.ensureModulesReady(false)
+		end
+	end)
+	task.wait(1.0)
+	if not isAlive() then return end
+
+	setStatus("⏳ Escaneando armas, melés y misiones... (3s)", "Inicializando Switch Hub (3/5)")
+	pcall(function()
+		KX.scanRealtimeMeleeAndWeapons()
+		if not isChooseTeamScreenOpen() and LocalPlayer.Character then
+			KX.scanPlayerState(true)
+		end
+	end)
+	task.wait(1.0)
+	if not isAlive() then return end
+
+	setStatus("⏳ Sincronizando mapa y spawners... (2s)", "Inicializando Switch Hub (4/5)")
+	pcall(function()
+		KX.getSpawnMap()
+	end)
+	task.wait(1.0)
+	if not isAlive() then return end
+
+	setStatus("⏳ Finalizando carga de opciones... (1s)", "Inicializando Switch Hub (5/5)")
+	task.wait(0.8)
+	if not isAlive() then return end
+
+	KX.startupReady = true
+	if not KX.autoFarm then
+		setStatus("Idle (Ready)", "Standby")
 	end
+
 	while isAlive() do
 		if KX.autoFarm then
 			local okStep, errStep = pcall(KX.stepMasterKaitun)
