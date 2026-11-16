@@ -145,6 +145,7 @@ local KX = {
 	},
 	smart2xExpCodes = true,
 	autoStats = true,
+	autoStatResetCodes = true, -- Instantly redeems Stat Reset codes if stats are out of Melee -> Defense -> Blox Fruit order
 	autoBuso = true,
 	autoKen = true,
 	autoRaceV3 = true,
@@ -161,11 +162,13 @@ local KX = {
 	fpsBoost = true, -- Active by default on startup (Low GPU/CPU)
 	afkMode = false,
 
-	-- Redeemed / Expired 2x EXP Codes Persistence
+	-- Redeemed / Expired 2x EXP & Stat Reset Codes Persistence
 	redeemedCodes = {},
+	redeemedResetCodes = {},
 	expBoostUntilClock = 0,
 	hudExpSeconds = 0,
 	lastCodeAttemptClock = 0,
+	lastStatResetAttemptClock = 0,
 
 	-- Live Game State Snapshot (Updated Continuously for UI & Brain)
 	worldNum = 1,
@@ -287,6 +290,7 @@ local function saveConfig()
 			allowedEatFruits = KX.allowedEatFruits,
 			smart2xExpCodes = KX.smart2xExpCodes,
 			autoStats = KX.autoStats,
+			autoStatResetCodes = KX.autoStatResetCodes,
 			autoBuso = KX.autoBuso,
 			autoKen = KX.autoKen,
 			autoRaceV3 = KX.autoRaceV3,
@@ -303,6 +307,7 @@ local function saveConfig()
 			fpsBoost = KX.fpsBoost,
 			afkMode = KX.afkMode,
 			redeemedCodes = KX.redeemedCodes,
+			redeemedResetCodes = KX.redeemedResetCodes,
 			ownedMelees = KX.ownedMelees,
 			meleeMastery = KX.meleeMastery,
 			meleeExp = KX.meleeExp,
@@ -331,6 +336,7 @@ local function loadConfig()
 		end
 		if type(decoded.smart2xExpCodes) == "boolean" then KX.smart2xExpCodes = decoded.smart2xExpCodes end
 		if type(decoded.autoStats) == "boolean" then KX.autoStats = decoded.autoStats end
+		if type(decoded.autoStatResetCodes) == "boolean" then KX.autoStatResetCodes = decoded.autoStatResetCodes end
 		if type(decoded.autoBuso) == "boolean" then KX.autoBuso = decoded.autoBuso end
 		if type(decoded.autoKen) == "boolean" then KX.autoKen = decoded.autoKen end
 		if type(decoded.autoRaceV3) == "boolean" then KX.autoRaceV3 = decoded.autoRaceV3 end
@@ -365,6 +371,11 @@ local function loadConfig()
 		if type(decoded.redeemedCodes) == "table" then
 			for k, v in pairs(decoded.redeemedCodes) do
 				if v then KX.redeemedCodes[tostring(k)] = true end
+			end
+		end
+		if type(decoded.redeemedResetCodes) == "table" then
+			for k, v in pairs(decoded.redeemedResetCodes) do
+				if v then KX.redeemedResetCodes[tostring(k)] = true end
 			end
 		end
 		if type(decoded.ownedMelees) == "table" then
@@ -730,6 +741,13 @@ local EXP_CODES_ORDERED = {
 	"SECRET_ADMIN",
 }
 
+-- Stat Refund / Reset Codes (redeemed instantly whenever stats are out of Melee -> Defense -> Blox Fruit order or requested)
+local STAT_RESET_CODES = {
+	"KITT_RESET",
+	"Sub2UncleKizaru",
+	"SUB2GAMERROBOT_RESET1",
+}
+
 do
 	local MELEE_ALIAS_MAP = {
 		["combat"] = {ui = "Combat", icon = "👊"},
@@ -978,6 +996,75 @@ do
 				return
 			end
 		end
+	end
+
+	KX.needsStatResetToOrder = function()
+		local data = LocalPlayer:FindFirstChild("Data")
+		local stFolder = data and data:FindFirstChild("Stats")
+		if not stFolder then return false end
+
+		local function getLv(sName)
+			local node = stFolder:FindFirstChild(sName)
+			local lv = node and node:FindFirstChild("Level")
+			return lv and tonumber(lv.Value) or 1
+		end
+
+		local cap = tonumber(KX.maxLevel) or 2800
+		local meleeLv = getLv("Melee")
+		local defLv = getLv("Defense")
+		local fruitLv = getLv("Demon Fruit")
+		local swordLv = getLv("Sword")
+		local gunLv = getLv("Gun")
+
+		if meleeLv < cap and (defLv > 1 or fruitLv > 1 or swordLv > 1 or gunLv > 1) then
+			return true
+		end
+		if defLv < cap and (fruitLv > 1 or swordLv > 1 or gunLv > 1) then
+			return true
+		end
+		if fruitLv < cap and (swordLv > 1 or gunLv > 1) then
+			return true
+		end
+		return false
+	end
+
+	-- Redeems Stat Reset codes IMMEDIATELY (no 2x EXP timer wait!)
+	KX.stepInstantStatResetCodes = function(forceRedeemAll)
+		if isChooseTeamScreenOpen() then return false end
+		if (not forceRedeemAll) and (not KX.autoStatResetCodes or not KX.needsStatResetToOrder()) then
+			return false
+		end
+		if not forceRedeemAll and (os.clock() - (KX.lastStatResetAttemptClock or 0) < 2.0) then
+			return false
+		end
+		if not RedeemRF then
+			RedeemRF = Remotes and Remotes:FindFirstChild("Redeem")
+		end
+		if not RedeemRF then return false end
+
+		local redeemedAny = false
+		for _, code in ipairs(STAT_RESET_CODES) do
+			if not KX.redeemedResetCodes[code] then
+				KX.lastStatResetAttemptClock = os.clock()
+				KX.redeemedResetCodes[code] = true
+				saveConfig()
+
+				local ok, res = pcall(function()
+					return RedeemRF:InvokeServer(code)
+				end)
+				local msg = tostring(res or ""):lower()
+				if ok and (msg:find("success") or msg:find("refund") or msg:find("reset") or msg:find("redeem") or not (msg:find("already") or msg:find("invalid") or msg:find("expired"))) then
+					redeemedAny = true
+					setStatus("🔄 Código Reset Stats canjeado: " .. code, "Stat Reset")
+					task.wait(0.25)
+					KX.stepSmartStats(true)
+					if (not forceRedeemAll) and (not KX.needsStatResetToOrder()) then
+						return true
+					end
+				end
+			end
+		end
+		return redeemedAny
 	end
 
 	local lastInvScanClock = 0
@@ -2583,13 +2670,13 @@ do
 		end
 	end
 
-	function KX.stepSmartStats()
-		if not KX.autoStats or not KX.autoFarm or isChooseTeamScreenOpen() or not CommF_ then return end
+	function KX.stepSmartStats(forceRun)
+		if (not forceRun) and (not KX.autoStats or not KX.autoFarm) then return end
+		if isChooseTeamScreenOpen() or not CommF_ then return end
 		local data = LocalPlayer:FindFirstChild("Data")
 		local ptsObj = data and data:FindFirstChild("Points")
 		local stFolder = data and data:FindFirstChild("Stats")
-		local pts = ptsObj and tonumber(ptsObj.Value) or 0
-		if pts <= 0 or not stFolder then return end
+		if not ptsObj or not stFolder then return end
 
 		local function getStatLv(sName)
 			local node = stFolder:FindFirstChild(sName)
@@ -2597,29 +2684,32 @@ do
 			return lv and tonumber(lv.Value) or 1
 		end
 
-		local meleeLv = getStatLv("Melee")
-		local defLv = getStatLv("Demon Fruit") -- wait: Defense is "Defense"!
-		defLv = getStatLv("Defense")
-		local swordLv = getStatLv("Sword")
-		local cap = KX.maxLevel
+		local cap = tonumber(KX.maxLevel) or 2800
+		local STAT_ORDER = {"Melee", "Defense", "Demon Fruit", "Sword", "Gun"}
 
-		local targetStat = "Melee"
-		local meleeDefRatio = (KX.worldNum == 1) and 3 or 2
-		if meleeLv < cap and (meleeLv <= (defLv * meleeDefRatio) or (KX.worldNum == 1 and defLv >= 300)) then
-			targetStat = "Melee"
-		elseif defLv < cap then
-			targetStat = "Defense"
-		elseif meleeLv < cap then
-			targetStat = "Melee"
-		elseif swordLv < cap then
-			targetStat = "Sword"
-		else
-			targetStat = "Demon Fruit"
+		for _ = 1, 5 do
+			local pts = tonumber(ptsObj.Value) or 0
+			if pts <= 0 then break end
+
+			local targetStat = nil
+			local need = 0
+			for _, sName in ipairs(STAT_ORDER) do
+				local curLv = getStatLv(sName)
+				if curLv < cap then
+					targetStat = sName
+					need = cap - curLv
+					break
+				end
+			end
+			if not targetStat or need <= 0 then break end
+
+			local spend = math.min(pts, need)
+			pcall(function()
+				CommF_:InvokeServer("AddPoint", targetStat, spend)
+			end)
+			if spend >= pts then break end
+			task.wait(0.08)
 		end
-
-		pcall(function()
-			CommF_:InvokeServer("AddPoint", targetStat, math.min(pts, 15))
-		end)
 	end
 
 	local fpsDescendantConn = nil
@@ -5352,8 +5442,9 @@ do
 
 		-- Background Kaitun Support Systems
 		KX.stepSmart2xExpCodes()
+		KX.stepInstantStatResetCodes(false)
 		KX.stepFruitSpinStoreAndEat()
-		KX.stepSmartStats()
+		KX.stepSmartStats(false)
 
 		-- TIER 1: Priority Raid / World Bosses (Interrupts leveling whenever active or summonable!)
 		if KX.tryStepPriorityBosses(hrp) then
@@ -6333,19 +6424,52 @@ do
 	addPurpleCheckbox(BoxCoreCfg, "🚀 Smart 2x EXP Codes", KX.smart2xExpCodes, 8, function(v)
 		KX.smart2xExpCodes = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "📊 Auto Stats (Melee/Def/Sword)", KX.autoStats, 9, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "📊 Auto Stats (Melee→Def→Fruit)", KX.autoStats, 9, function(v)
 		KX.autoStats = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🛡️ Auto Buso Haki", KX.autoBuso, 10, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🔄 Auto Canjear Reset Stats", KX.autoStatResetCodes, 10, function(v)
+		KX.autoStatResetCodes = v; saveConfig()
+	end)
+
+	local StatResetNowBtn = Instance.new("TextButton")
+	StatResetNowBtn.Size = UDim2.new(1, 0, 0, 24)
+	StatResetNowBtn.BackgroundColor3 = THEME.CheckBg
+	StatResetNowBtn.BorderSizePixel = 0
+	StatResetNowBtn.LayoutOrder = 11
+	StatResetNowBtn.Font = Enum.Font.RobotoMono
+	StatResetNowBtn.TextSize = 11
+	StatResetNowBtn.TextColor3 = THEME.AccentBright
+	StatResetNowBtn.Text = "🔄 Canjear Códigos Reset Stats [Click]"
+	StatResetNowBtn.ZIndex = 4
+	StatResetNowBtn.Parent = BoxCoreCfg
+	local srCorner = Instance.new("UICorner")
+	srCorner.CornerRadius = UDim.new(0, 4)
+	srCorner.Parent = StatResetNowBtn
+	local srStroke = Instance.new("UIStroke")
+	srStroke.Color = THEME.BorderBox
+	srStroke.Thickness = 1
+	srStroke.Parent = StatResetNowBtn
+
+	connect(StatResetNowBtn.MouseButton1Click, function()
+		task.spawn(function()
+			StatResetNowBtn.Text = "🔄 Canjeando códigos Reset..."
+			local okAny = KX.stepInstantStatResetCodes(true)
+			StatResetNowBtn.Text = okAny and "✅ ¡Reset Stats Canjeado!" or "ℹ️ Sin códigos pendientes"
+			task.wait(2.0)
+			StatResetNowBtn.Text = "🔄 Canjear Códigos Reset Stats [Click]"
+		end)
+	end)
+
+	addPurpleCheckbox(BoxCoreCfg, "🛡️ Auto Buso Haki", KX.autoBuso, 12, function(v)
 		KX.autoBuso = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "👁️ Auto Ken (Observation)", KX.autoKen, 11, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "👁️ Auto Ken (Observation)", KX.autoKen, 13, function(v)
 		KX.autoKen = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "⚡ Auto Race V3", KX.autoRaceV3, 12, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "⚡ Auto Race V3", KX.autoRaceV3, 14, function(v)
 		KX.autoRaceV3 = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🌐 Smart Server Hop", KX.smartServerHop, 13, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🌐 Smart Server Hop", KX.smartServerHop, 15, function(v)
 		KX.smartServerHop = v; saveConfig()
 	end)
 
@@ -6354,7 +6478,7 @@ do
 	RaidChipBtn.Size = UDim2.new(1, 0, 0, 24)
 	RaidChipBtn.BackgroundColor3 = THEME.CheckBg
 	RaidChipBtn.BorderSizePixel = 0
-	RaidChipBtn.LayoutOrder = 14
+	RaidChipBtn.LayoutOrder = 16
 	RaidChipBtn.Font = Enum.Font.RobotoMono
 	RaidChipBtn.TextSize = 11
 	RaidChipBtn.TextColor3 = THEME.AccentBright
@@ -6753,6 +6877,10 @@ task.spawn(function()
 	if not isAlive() then return end
 
 	KX.startupReady = true
+	task.spawn(function()
+		pcall(function() KX.stepInstantStatResetCodes(false) end)
+		pcall(function() KX.stepSmartStats(false) end)
+	end)
 	if not KX.autoFarm then
 		setStatus("Idle (Ready)", "Standby")
 	end
