@@ -154,7 +154,8 @@ local KX = {
 	selectedRaidType = "Auto", -- "Auto" (matches fruit or Flame), "Flame", "Ice", "Light", "Magma", "Buddha", "Dark"
 	tweenSpeed = 185, -- Balanced anti-rubberband speed (165 Segura / 185 Moderada / 205 Rápida)
 	attackInterval = 0.020, -- Turbo M1 cadence (~50 ticks/sec cleanly synced on Heartbeat + multi-target cleave)
-	bringMobs = true, -- High-frequency collision-free Bring Mob (up to 12 mobs within 350 studs)
+	bringMobs = true, -- High-frequency collision-free Bring Mob (2-3 nearest mobs within 350 studs)
+	bringMaxMobs = 3, -- Max mobs brought at once (2 or 3)
 	sea1SkyPriorityFarm = true, -- Sea 1 Only: Farm high-level Sky NPCs (+ Quest) until Lv. 625, then Fountain City (last island)
 	noAttackAnimation = true, -- Removes character M1 swing/hit animation & lunge
 	fpsBoost = true, -- Active by default on startup (Low GPU/CPU)
@@ -296,6 +297,7 @@ local function saveConfig()
 			tweenSpeed = KX.tweenSpeed,
 			attackInterval = KX.attackInterval,
 			bringMobs = KX.bringMobs,
+			bringMaxMobs = KX.bringMaxMobs,
 			sea1SkyPriorityFarm = KX.sea1SkyPriorityFarm,
 			noAttackAnimation = KX.noAttackAnimation,
 			fpsBoost = KX.fpsBoost,
@@ -348,6 +350,9 @@ local function loadConfig()
 		end
 		if type(decoded.bringMobs) == "boolean" then
 			KX.bringMobs = decoded.bringMobs
+		end
+		if tonumber(decoded.bringMaxMobs) then
+			KX.bringMaxMobs = math.clamp(math.floor(tonumber(decoded.bringMaxMobs)), 2, 3)
 		end
 		if type(decoded.sea1SkyPriorityFarm) == "boolean" then
 			KX.sea1SkyPriorityFarm = decoded.sea1SkyPriorityFarm
@@ -1843,42 +1848,62 @@ do
 		end
 		local enemies = Workspace:FindFirstChild("Enemies")
 		if not enemies or not anchorPos then return end
-		local targetCF = CFrame.new(anchorPos)
-		local brought = 0
+
+		local maxBring = math.clamp(math.floor(tonumber(KX.bringMaxMobs) or 3), 2, 3)
+		local candidates = {}
 		for _, m in ipairs(enemies:GetChildren()) do
-			if brought >= 12 then break end
 			if m:IsA("Model")
 				and (not mobSet or mobSet[m.Name])
 				and not WORLD_BOSS_DONT_BRING[m.Name]
 				and KX.isModelAlive(m) then
 				local p = KX.getModelRoot(m)
-				local eHum = m:FindFirstChildOfClass("Humanoid")
-				if p and (p.Position - anchorPos).Magnitude <= 350 then
-					pcall(function()
-						if not bringCollisionDisabled[m] then
-							bringCollisionDisabled[m] = true
-							for _, bp in ipairs(m:GetChildren()) do
-								if bp:IsA("BasePart") then
-									bp.CanCollide = false
-								end
-							end
-						end
-						p.CanCollide = false
-						if (p.Position - anchorPos).Magnitude > 1.25 then
-							p.CFrame = targetCF
-						end
-						p.AssemblyLinearVelocity = Vector3.zero
-						p.AssemblyAngularVelocity = Vector3.zero
-						if eHum then
-							if eHum.WalkSpeed ~= 0 then eHum.WalkSpeed = 0 end
-							if eHum.JumpPower ~= 0 then eHum.JumpPower = 0 end
-							eHum.AutoRotate = false
-							eHum.Sit = false
-						end
-					end)
-					brought = brought + 1
+				if p then
+					local dist = (p.Position - anchorPos).Magnitude
+					if dist <= 350 then
+						local sortDist = (m == KX.bringTargetModel or m == KX.lastAimEnemy) and -1 or dist
+						table.insert(candidates, {
+							model = m,
+							root = p,
+							hum = m:FindFirstChildOfClass("Humanoid"),
+							d = sortDist,
+						})
+					end
 				end
 			end
+		end
+
+		if #candidates == 0 then return end
+		table.sort(candidates, function(a, b) return a.d < b.d end)
+
+		local targetCF = CFrame.new(anchorPos)
+		local limit = math.min(maxBring, #candidates)
+		for i = 1, limit do
+			local entry = candidates[i]
+			local m = entry.model
+			local p = entry.root
+			local eHum = entry.hum
+			pcall(function()
+				if not bringCollisionDisabled[m] then
+					bringCollisionDisabled[m] = true
+					for _, bp in ipairs(m:GetChildren()) do
+						if bp:IsA("BasePart") then
+							bp.CanCollide = false
+						end
+					end
+				end
+				p.CanCollide = false
+				if (p.Position - anchorPos).Magnitude > 1.25 then
+					p.CFrame = targetCF
+				end
+				p.AssemblyLinearVelocity = Vector3.zero
+				p.AssemblyAngularVelocity = Vector3.zero
+				if eHum then
+					if eHum.WalkSpeed ~= 0 then eHum.WalkSpeed = 0 end
+					if eHum.JumpPower ~= 0 then eHum.JumpPower = 0 end
+					eHum.AutoRotate = false
+					eHum.Sit = false
+				end
+			end)
 		end
 	end
 
@@ -2633,7 +2658,7 @@ do
 				for idx, d in ipairs(Workspace:GetDescendants()) do
 					if not KX.fpsBoost then break end
 					pcall(optimizeInstanceForFps, d)
-					if idx % 600 == 0 then
+					if idx % 350 == 0 then
 						task.wait()
 					end
 				end
@@ -6272,28 +6297,55 @@ do
 	addPurpleCheckbox(BoxCoreCfg, "🧲 Bring Mob (Agrupar Enemigos)", KX.bringMobs, 4, function(v)
 		KX.bringMobs = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "☁️ Sea 1: Farm Cielo + Última Isla", KX.sea1SkyPriorityFarm, 5, function(v)
+
+	local BringMaxBtn = Instance.new("TextButton")
+	BringMaxBtn.Size = UDim2.new(1, 0, 0, 24)
+	BringMaxBtn.BackgroundColor3 = THEME.CheckBg
+	BringMaxBtn.BorderSizePixel = 0
+	BringMaxBtn.LayoutOrder = 5
+	BringMaxBtn.Font = Enum.Font.RobotoMono
+	BringMaxBtn.TextSize = 11
+	BringMaxBtn.TextColor3 = THEME.AccentBright
+	BringMaxBtn.Text = "🧲 Máx. Bring Mob : " .. tostring(math.clamp(tonumber(KX.bringMaxMobs) or 3, 2, 3)) .. " Mobs [Click]"
+	BringMaxBtn.ZIndex = 4
+	BringMaxBtn.Parent = BoxCoreCfg
+	local bmCorner = Instance.new("UICorner")
+	bmCorner.CornerRadius = UDim.new(0, 4)
+	bmCorner.Parent = BringMaxBtn
+	local bmStroke = Instance.new("UIStroke")
+	bmStroke.Color = THEME.BorderBox
+	bmStroke.Thickness = 1
+	bmStroke.Parent = BringMaxBtn
+
+	connect(BringMaxBtn.MouseButton1Click, function()
+		local cur = math.clamp(math.floor(tonumber(KX.bringMaxMobs) or 3), 2, 3)
+		KX.bringMaxMobs = (cur == 3) and 2 or 3
+		BringMaxBtn.Text = "🧲 Máx. Bring Mob : " .. tostring(KX.bringMaxMobs) .. " Mobs [Click]"
+		saveConfig()
+	end)
+
+	addPurpleCheckbox(BoxCoreCfg, "☁️ Sea 1: Farm Cielo + Última Isla", KX.sea1SkyPriorityFarm, 6, function(v)
 		KX.sea1SkyPriorityFarm = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🚫 Sin Animación de Golpe (No Hit Anim)", KX.noAttackAnimation, 6, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🚫 Sin Animación de Golpe (No Hit Anim)", KX.noAttackAnimation, 7, function(v)
 		KX.noAttackAnimation = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🚀 Smart 2x EXP Codes", KX.smart2xExpCodes, 7, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🚀 Smart 2x EXP Codes", KX.smart2xExpCodes, 8, function(v)
 		KX.smart2xExpCodes = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "📊 Auto Stats (Melee/Def/Sword)", KX.autoStats, 8, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "📊 Auto Stats (Melee/Def/Sword)", KX.autoStats, 9, function(v)
 		KX.autoStats = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🛡️ Auto Buso Haki", KX.autoBuso, 9, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🛡️ Auto Buso Haki", KX.autoBuso, 10, function(v)
 		KX.autoBuso = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "👁️ Auto Ken (Observation)", KX.autoKen, 10, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "👁️ Auto Ken (Observation)", KX.autoKen, 11, function(v)
 		KX.autoKen = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "⚡ Auto Race V3", KX.autoRaceV3, 11, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "⚡ Auto Race V3", KX.autoRaceV3, 12, function(v)
 		KX.autoRaceV3 = v; saveConfig()
 	end)
-	addPurpleCheckbox(BoxCoreCfg, "🌐 Smart Server Hop", KX.smartServerHop, 12, function(v)
+	addPurpleCheckbox(BoxCoreCfg, "🌐 Smart Server Hop", KX.smartServerHop, 13, function(v)
 		KX.smartServerHop = v; saveConfig()
 	end)
 
@@ -6302,7 +6354,7 @@ do
 	RaidChipBtn.Size = UDim2.new(1, 0, 0, 24)
 	RaidChipBtn.BackgroundColor3 = THEME.CheckBg
 	RaidChipBtn.BorderSizePixel = 0
-	RaidChipBtn.LayoutOrder = 13
+	RaidChipBtn.LayoutOrder = 14
 	RaidChipBtn.Font = Enum.Font.RobotoMono
 	RaidChipBtn.TextSize = 11
 	RaidChipBtn.TextColor3 = THEME.AccentBright
