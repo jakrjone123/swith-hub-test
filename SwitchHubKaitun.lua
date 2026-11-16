@@ -3228,15 +3228,39 @@ do
 	end
 
 	local SEA1_FAST_BOSS_QUESTS = {
-		{minLvl = 680, questGroup = "FountainQuest", questIndex = 3, levelReq = 675, mobName = "Cyborg", npcFallback = CFrame.new(5263.49, 74.91, 4087.62)},
-		{minLvl = 580, questGroup = "SkyExp2Quest",  questIndex = 3, levelReq = 575, mobName = "Thunder God", npcFallback = CFrame.new(-7033.10, 5590.57, 1353.11)},
-		{minLvl = 515, questGroup = "SkyExp1Quest",  questIndex = 3, levelReq = 500, mobName = "Wysper", npcFallback = CFrame.new(-5949.07, 5467.94, 2086.52)},
-		{minLvl = 430, questGroup = "FishmanQuest",  questIndex = 3, levelReq = 425, mobName = "Fishman Lord", npcFallback = CFrame.new(61122.6, 18.5, 1569.4)},
-		{minLvl = 355, questGroup = "MagmaQuest",    questIndex = 3, levelReq = 350, mobName = "Magma Admiral", npcFallback = CFrame.new(-5313.4, 12.3, 8515.3)},
-		{minLvl = 135, questGroup = "MarineQuest2",  questIndex = 2, levelReq = 130, mobName = "Vice Admiral", npcFallback = CFrame.new(-5039.6, 27.4, 4324.7)},
-		{minLvl = 110, questGroup = "SnowQuest",     questIndex = 3, levelReq = 105, mobName = "Yeti", npcFallback = CFrame.new(1389.8, 87.3, -1298.9)},
-		{minLvl = 25,  questGroup = "JungleQuest",   questIndex = 3, levelReq = 20,  mobName = "The Gorilla King", npcFallback = CFrame.new(-1598.1, 35.6, 153.4)},
+		{minLvl = 680, maxLvl = 750, questGroup = "FountainQuest", questIndex = 3, levelReq = 675, mobName = "Cyborg", npcFallback = CFrame.new(5263.49, 74.91, 4087.62)},
+		{minLvl = 580, maxLvl = 624, questGroup = "SkyExp2Quest",  questIndex = 3, levelReq = 575, mobName = "Thunder God", npcFallback = CFrame.new(-7033.10, 5590.57, 1353.11)},
+		{minLvl = 515, maxLvl = 624, questGroup = "SkyExp1Quest",  questIndex = 3, levelReq = 500, mobName = "Wysper", npcFallback = CFrame.new(-5949.07, 5467.94, 2086.52)},
 	}
+
+	local lastSkyAbandonClock = 0
+	local skyPowerPatrolIdx = 1
+	local lastSkyPowerPatrolClock = 0
+	local SEA1_UPPER_SKY_FALLBACK_PATROL = {
+		CFrame.new(-5890.41, 5468.90, 1956.19), -- Shanda [Lv. 475]
+		CFrame.new(-6706.87, 5551.41, 1155.43), -- Royal Squad [Lv. 525]
+		CFrame.new(-6938.38, 5541.05, 963.78),  -- Royal Soldier [Lv. 550]
+	}
+
+	local function getUpperSkyPowerPatrolPoints()
+		local spMap = KX.getSpawnMap()
+		local pts = {}
+		for _, mName in ipairs({"Shanda", "Royal Squad", "Royal Soldier"}) do
+			local list = spMap and spMap[mName]
+			if list and #list > 0 then
+				for _, cf in ipairs(list) do
+					if cf.Position.Y > 3500 then
+						table.insert(pts, cf)
+						break
+					end
+				end
+			end
+		end
+		if #pts == 0 then
+			return SEA1_UPPER_SKY_FALLBACK_PATROL
+		end
+		return pts
+	end
 
 	function KX.tryGetSpawnedSea1BossQuest(hrp, lvl)
 		local hasAnyQ = KX.getActiveQuestInfo(nil, nil)
@@ -3258,7 +3282,7 @@ do
 		end
 
 		for _, b in ipairs(SEA1_FAST_BOSS_QUESTS) do
-			if lvl >= b.minLvl and (lvl - b.levelReq <= 160) then
+			if lvl >= b.minLvl and lvl <= b.maxLvl then
 				local alreadySameBossQ = false
 				if hasAnyQ then
 					local _, matches = KX.getActiveQuestInfo(b.questGroup, b.mobName)
@@ -3293,7 +3317,7 @@ do
 	function KX.stepSea1SkyAndFountainFarm(hrp, customLabel)
 		local lvl = tonumber(KX.level) or 1
 
-		-- 0) Opportunistic Sea 1 Boss Quest when a nearby Boss is already spawned (+massive instant XP!)
+		-- 0) Opportunistic Sky / Fountain Boss Quest when already spawned in our current tier
 		local bossQ = KX.tryGetSpawnedSea1BossQuest(hrp, lvl)
 		if bossQ and KX.ensureQuestAccepted(bossQ, hrp) then
 			local bEnemy = KX.findExactBoss({bossQ.mobName}, false) or bossQ.bossModel
@@ -3303,56 +3327,96 @@ do
 			end
 		end
 
-		-- 1) Lv. 1 - 149 -> Accept highest unlocked Sea 1 mission until SkyQuest (Lv. 150) unlocks
-		if lvl < 150 then
+		-- 1) Quick Starter Warmup (Lv. 1 - 9) before entering Upper Skylands
+		if lvl < 10 then
 			local qInfo = KX.getBestLevelQuest()
 			if qInfo and KX.ensureQuestAccepted(qInfo, hrp) then
-				KX.farmMobSpawns(qInfo.mobName, qInfo.spawns, customLabel or ("⚔️ Sea 1 Misión [Lv." .. tostring(lvl) .. " • " .. tostring(qInfo.mobName) .. "]"), "Melee")
+				KX.farmMobSpawns(qInfo.mobName, qInfo.spawns, customLabel or ("⚔️ Sea 1 Warmup [Lv." .. tostring(lvl) .. "]"), "Melee")
 			end
 			return
 		end
 
-		-- 2) Lv. 250 - 449 -> Fast High-EXP Islands (Colosseum 1.3M -> Magma 2.0M -> Fishman 3.35M) instead of stalling at Dark Master Lv.175!
-		if lvl >= 250 and lvl < 450 then
-			local midQ = KX.getBestLevelQuest()
-			if midQ and KX.ensureQuestAccepted(midQ, hrp) then
-				KX.farmMobSpawns(midQ.mobName, midQ.spawns, customLabel or string.format("⚔️ Sea 1 Turbo [Lv.%d • %s]", lvl, midQ.mobName), "Melee")
-			end
-			return
-		end
-
-		-- 3) Near the Last Island of Sea 1 (Lv. 625 - 699 -> Fountain City normal quest farm)
+		-- 2) Lv. 625+ (Nivel superior a todos los Skys) -> Se va a la isla correspondiente (Fountain City) normalmente!
 		if lvl >= 625 then
 			local fQuest = KX.getSea1SkyOrFountainQuestInfo()
 			if fQuest and KX.ensureQuestAccepted(fQuest, hrp) then
-				local lbl = customLabel or string.format("⛲ Sea 1 Última Isla [Lv.%d • %s]", lvl, fQuest.mobName)
+				local lbl = customLabel or string.format("⛲ Sea 1 Nivel Correspondiente [Lv.%d • %s]", lvl, fQuest.mobName)
 				KX.farmMobSpawns(fQuest.mobName, fQuest.spawns, lbl, "Melee")
 			end
 			return
 		end
 
-		-- 4) Lv. 150 - 249 (SkyQuest) & Lv. 450 - 624 (SkyExp1Quest -> SkyExp2Quest) -> Skylands + Misión
-		local skyQuest = KX.getSea1SkyOrFountainQuestInfo()
-		if skyQuest and KX.ensureQuestAccepted(skyQuest, hrp) then
-			local lbl = customLabel or string.format("☁️ Sea 1 Cielo + Misión [Lv.%d • %s]", lvl, skyQuest.mobName)
-			local targetSet = {[skyQuest.mobName] = true}
-			local qEnemy = KX.findNearestAliveFromSet(targetSet)
-			if qEnemy then
-				KX.engageTarget(qEnemy, targetSet, lbl, "Melee")
-				return
+		-- 3) Lv. 150 - 624 -> Skylands con Misión (SkyQuest Lv.150-449 -> SkyExp1Quest Lv.450-524 -> SkyExp2Quest Lv.525-624)
+		if lvl >= 150 then
+			local skyQuest = KX.getSea1SkyOrFountainQuestInfo()
+			if skyQuest and KX.ensureQuestAccepted(skyQuest, hrp) then
+				local lbl = customLabel or string.format("☁️ Sea 1 Skys + Misión [Lv.%d • %s]", lvl, skyQuest.mobName)
+				local targetSet = {[skyQuest.mobName] = true}
+				local qEnemy = KX.findNearestAliveFromSet(targetSet)
+				if qEnemy then
+					KX.engageTarget(qEnemy, targetSet, lbl, "Melee")
+					return
+				end
+				-- While Upper Sky quest wave respawns (Lv.475+), clear adjacent Upper Sky high-level mobs for bonus XP
+				if lvl >= 475 then
+					local bonusSkyMob = KX.findNearestAliveFromSet(SEA1_UPPER_SKY_MOBS_SET)
+					if bonusSkyMob then
+						local bRoot = KX.getModelRoot(bonusSkyMob)
+						if bRoot and bRoot.Position.Y > 3500 then
+							KX.engageTarget(bonusSkyMob, SEA1_UPPER_SKY_MOBS_SET, lbl .. " (Bonus XP)", "Melee")
+							return
+						end
+					end
+				end
+				KX.farmMobSpawns(skyQuest.mobName, skyQuest.spawns, lbl, "Melee")
 			end
-			-- While quest mob wave is respawning, clear nearby alive Sky cluster on the same Sky layer for bonus XP!
-			if lvl >= 475 then
-				local bonusSkyMob = KX.findNearestAliveFromSet(SEA1_UPPER_SKY_MOBS_SET)
-				if bonusSkyMob then
-					local bRoot = KX.getModelRoot(bonusSkyMob)
-					if bRoot and bRoot.Position.Y > 3500 then
-						KX.engageTarget(bonusSkyMob, SEA1_UPPER_SKY_MOBS_SET, lbl .. " (Bonus XP)", "Melee")
-						return
+			return
+		end
+
+		-- 4) Lv. 10 - 149 (Antes de desbloquear misiones Sky Lv.150) -> Ataca a los Skys de nivel alto (Shanda / Royal Squad / Royal Soldier)!
+		local hasOldQ = KX.getActiveQuestInfo(nil, nil)
+		if hasOldQ and CommF_ and (os.clock() - lastSkyAbandonClock >= 2.0) then
+			lastSkyAbandonClock = os.clock()
+			pcall(function() CommF_:InvokeServer("AbandonQuest") end)
+		end
+
+		local lbl = customLabel or string.format("☁️ Sea 1 Skys Altos [Lv.%d -> 150]", lvl)
+		local bestSkyMob = nil
+		local bestDist = math.huge
+		local enemies = Workspace:FindFirstChild("Enemies")
+		if enemies then
+			for _, m in ipairs(enemies:GetChildren()) do
+				if m:IsA("Model") and SEA1_UPPER_SKY_MOBS_SET[m.Name] and KX.isModelAlive(m) then
+					local p = KX.getModelRoot(m)
+					if p and p.Position.Y > 3500 then
+						local d = (p.Position - hrp.Position).Magnitude
+						if m.Name == "Shanda" then d = d * 0.72 end
+						if d < bestDist then
+							bestDist = d
+							bestSkyMob = m
+						end
 					end
 				end
 			end
-			KX.farmMobSpawns(skyQuest.mobName, skyQuest.spawns, lbl, "Melee")
+		end
+
+		if bestSkyMob then
+			KX.engageTarget(bestSkyMob, SEA1_UPPER_SKY_MOBS_SET, lbl, "Melee")
+			return
+		end
+
+		local patrolList = getUpperSkyPowerPatrolPoints()
+		local sp = patrolList[((skyPowerPatrolIdx - 1) % #patrolList) + 1]
+		local hoverCF = sp * CFrame.new(0, 18, 0)
+		setStatus(lbl .. " (Viajando / Esperando Skys...)", KX.phaseText)
+		local reached = KX.moveToCFrame(hoverCF)
+		if reached or (hrp.Position - hoverCF.Position).Magnitude <= 35 then
+			if os.clock() - lastSkyPowerPatrolClock >= 1.5 then
+				lastSkyPowerPatrolClock = os.clock()
+				skyPowerPatrolIdx = (skyPowerPatrolIdx % #patrolList) + 1
+			end
+		else
+			lastSkyPowerPatrolClock = os.clock()
 		end
 	end
 
