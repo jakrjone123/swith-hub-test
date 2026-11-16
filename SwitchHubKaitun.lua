@@ -153,8 +153,8 @@ local KX = {
 	raidKillAuraUpTo3 = true, -- Kill Aura active on Islands 1-3 + Fighting Style (Melee) on all islands
 	selectedRaidType = "Auto", -- "Auto" (matches fruit or Flame), "Flame", "Ice", "Light", "Magma", "Buddha", "Dark"
 	tweenSpeed = 185, -- Balanced anti-rubberband speed (165 Segura / 185 Moderada / 205 Rápida)
-	attackInterval = 0.042, -- Ultra Fast M1 cadence (~24 ticks/sec + multi-target burst)
-	bringMobs = true, -- High-frequency cluster Bring Mob (up to 10 mobs within 340 studs)
+	attackInterval = 0.020, -- Turbo M1 cadence (~50 ticks/sec cleanly synced on Heartbeat + multi-target cleave)
+	bringMobs = true, -- High-frequency collision-free Bring Mob (up to 12 mobs within 350 studs)
 	sea1SkyPriorityFarm = true, -- Sea 1 Only: Farm high-level Sky NPCs (+ Quest) until Lv. 625, then Fountain City (last island)
 	noAttackAnimation = true, -- Removes character M1 swing/hit animation & lunge
 	fpsBoost = true, -- Active by default on startup (Low GPU/CPU)
@@ -277,6 +277,7 @@ local function saveConfig()
 			makefolder(CONFIG_FOLDER)
 		end
 		local payload = {
+			configVersion = 2,
 			autoFarm = KX.autoFarm,
 			preferredTeam = KX.preferredTeam,
 			autoSpinAndStoreFruits = KX.autoSpinAndStoreFruits,
@@ -340,8 +341,10 @@ local function loadConfig()
 		end
 		if tonumber(decoded.attackInterval) then
 			local ai = tonumber(decoded.attackInterval)
-			if ai > 0.075 then ai = 0.042 end
-			KX.attackInterval = math.clamp(ai, 0.025, 0.075)
+			if (tonumber(decoded.configVersion) or 1) < 2 and ai >= 0.038 then
+				ai = 0.020
+			end
+			KX.attackInterval = math.clamp(ai, 0.010, 0.12)
 		end
 		if type(decoded.bringMobs) == "boolean" then
 			KX.bringMobs = decoded.bringMobs
@@ -408,6 +411,7 @@ local AimAssistModule = nil
 local CombatUtil = nil
 local GlobalModule = nil
 local MouseModule = nil
+local NetModule = nil
 
 genv.__SwitchHubSeriesX_OrigHooks = genv.__SwitchHubSeriesX_OrigHooks or {}
 local OrigHooks = genv.__SwitchHubSeriesX_OrigHooks
@@ -619,6 +623,13 @@ do
 			pcall(function()
 				local ms = ReplicatedStorage:FindFirstChild("Mouse")
 				if ms then MouseModule = require(ms); loadedAny = true end
+			end)
+		end
+		if not NetModule then
+			pcall(function()
+				local m = ReplicatedStorage:FindFirstChild("Modules")
+				local nm = m and m:FindFirstChild("Net")
+				if nm then NetModule = require(nm) end
 			end)
 		end
 		if loadedAny then
@@ -1434,8 +1445,21 @@ do
 
 		local targetPos = targetCF.Position
 
-		-- Deterministic Sea 1 Upper Skylands (SkyArea2) instant portal routing
+		-- Deterministic Sea 1 Underwater City (Fishman) & Upper Skylands (SkyArea2) portal routing
 		if KX.worldNum == 1 and CommF_ then
+			if targetPos.X > 40000 and hrp.Position.X < 40000 and (os.clock() - lastPortalClock >= 2.5) then
+				lastPortalClock = os.clock()
+				if KX.invokeRequestEntrance(Vector3.new(61163.8, 11.7, 1819.7)) then
+					task.wait(0.28)
+					return false
+				end
+			elseif targetPos.X < 40000 and hrp.Position.X > 40000 and (os.clock() - lastPortalClock >= 2.5) then
+				lastPortalClock = os.clock()
+				if KX.invokeRequestEntrance(Vector3.new(3864.6, 6.7, -1926.2)) then
+					task.wait(0.28)
+					return false
+				end
+			end
 			if targetPos.Y > 3500 and hrp.Position.Y < 3500 and (os.clock() - lastPortalClock >= 2.5) then
 				local map = Workspace:FindFirstChild("Map")
 				local sky2 = map and map:FindFirstChild("SkyArea2")
@@ -1804,9 +1828,14 @@ do
 			or model.PrimaryPart
 	end
 
+	local bringCollisionDisabled = setmetatable({}, {__mode = "k"})
+	local lastSimRadClock = 0
+
 	function KX.bringClusterMobs(anchorPos, mobSet)
 		if not KX.bringMobs then return end
-		if sethiddenproperty then
+		local now = os.clock()
+		if sethiddenproperty and (now - lastSimRadClock >= 0.25) then
+			lastSimRadClock = now
 			pcall(function()
 				sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
 				sethiddenproperty(LocalPlayer, "MaxSimulationRadius", math.huge)
@@ -1817,23 +1846,34 @@ do
 		local targetCF = CFrame.new(anchorPos)
 		local brought = 0
 		for _, m in ipairs(enemies:GetChildren()) do
-			if brought >= 10 then break end
+			if brought >= 12 then break end
 			if m:IsA("Model")
 				and (not mobSet or mobSet[m.Name])
 				and not WORLD_BOSS_DONT_BRING[m.Name]
 				and KX.isModelAlive(m) then
 				local p = KX.getModelRoot(m)
 				local eHum = m:FindFirstChildOfClass("Humanoid")
-				if p and (p.Position - anchorPos).Magnitude <= 340 then
+				if p and (p.Position - anchorPos).Magnitude <= 350 then
 					pcall(function()
-						p.CFrame = targetCF
+						if not bringCollisionDisabled[m] then
+							bringCollisionDisabled[m] = true
+							for _, bp in ipairs(m:GetChildren()) do
+								if bp:IsA("BasePart") then
+									bp.CanCollide = false
+								end
+							end
+						end
 						p.CanCollide = false
+						if (p.Position - anchorPos).Magnitude > 1.25 then
+							p.CFrame = targetCF
+						end
 						p.AssemblyLinearVelocity = Vector3.zero
 						p.AssemblyAngularVelocity = Vector3.zero
 						if eHum then
-							eHum.WalkSpeed = 0
-							eHum.JumpPower = 0
+							if eHum.WalkSpeed ~= 0 then eHum.WalkSpeed = 0 end
+							if eHum.JumpPower ~= 0 then eHum.JumpPower = 0 end
 							eHum.AutoRotate = false
+							eHum.Sit = false
 						end
 					end)
 					brought = brought + 1
@@ -1875,20 +1915,36 @@ do
 				end
 			end)
 		end
+		if GlobalModule then
+			pcall(function()
+				if tonumber(GlobalModule.tapCooldown) and GlobalModule.tapCooldown > 0 then
+					GlobalModule.tapCooldown = 0
+				end
+			end)
+		end
 		local gup = (debug and debug.getupvalues) or getupvalues
 		local sup = (debug and debug.setupvalue) or setupvalue
 		if type(gup) ~= "function" or type(sup) ~= "function" then return end
 		pcall(function()
 			if not cachedAttackMeleeChecked and CombatController and type(CombatController.Attack) == "function" then
 				cachedAttackMeleeChecked = true
-				local ups = gup(CombatController.Attack)
-				if type(ups) == "table" then
-					for _, v in pairs(ups) do
-						if type(v) == "function" then
-							local subUps = gup(v)
-							if type(subUps) == "table" and type(subUps[2]) == "boolean" and subUps[3] == CombatUtil then
-								cachedAttackMeleeFn = v
-								break
+				local gfenv = getfenv
+				if type(gfenv) == "function" then
+					local envFn = rawget(gfenv(CombatController.Attack), "attackMelee")
+					if type(envFn) == "function" then
+						cachedAttackMeleeFn = envFn
+					end
+				end
+				if not cachedAttackMeleeFn then
+					local ups = gup(CombatController.Attack)
+					if type(ups) == "table" then
+						for _, v in pairs(ups) do
+							if type(v) == "function" then
+								local subUps = gup(v)
+								if type(subUps) == "table" and type(subUps[2]) == "boolean" and subUps[3] == CombatUtil then
+									cachedAttackMeleeFn = v
+									break
+								end
 							end
 						end
 					end
@@ -1964,7 +2020,7 @@ do
 		local hrp, hum = KX.getRootAndHum()
 		if not hrp or not hum or not ePart or not ePart.Parent then return end
 
-		local interval = math.clamp(tonumber(KX.attackInterval) or 0.042, 0.025, 0.20)
+		local interval = math.clamp(tonumber(KX.attackInterval) or 0.020, 0.010, 0.12)
 		if os.clock() - lastAttackClock < interval then return end
 		lastAttackClock = os.clock()
 
@@ -1990,9 +2046,9 @@ do
 		local enemies = Workspace:FindFirstChild("Enemies")
 		if enemies then
 			for _, m in ipairs(enemies:GetChildren()) do
-				if m ~= enemyModel and m:IsA("Model") and KX.isModelAlive(m) and #extraHits < 12 then
+				if m ~= enemyModel and m:IsA("Model") and KX.isModelAlive(m) and #extraHits < 16 then
 					local p2 = KX.getModelRoot(m)
-					if p2 and ((p2.Position - ePart.Position).Magnitude <= 65 or (p2.Position - hrp.Position).Magnitude <= 65) then
+					if p2 and ((p2.Position - ePart.Position).Magnitude <= 72 or (p2.Position - hrp.Position).Magnitude <= 72) then
 						local limb2 = KX.getHitLimb(m) or p2
 						table.insert(extraHits, {m, limb2})
 					end
@@ -2024,21 +2080,30 @@ do
 				if tool then tool:Activate() end
 			end)
 		else
-			-- Melee / Sword: Unlock internal cooldown gate, fire CombatController:Attack,
-			-- and dispatch multi-target RegisterAttack + SendHitsToServer burst!
+			-- Melee / Sword: Unlock cooldown gates, resolve Net virtual remotes,
+			-- and dispatch high-speed multi-target RegisterAttack + SendHitsToServer burst!
 			unlockCombatControllerCooldown()
-			pcall(function()
-				if CombatController and type(CombatController.Attack) == "function" and tool then
-					CombatController:Attack(tool, FakeInput)
-				end
-			end)
+			local hasFastRemote = (GlobalModule and type(GlobalModule.SendHitsToServer) == "function")
+				or (NetModule and type(NetModule.RemoteEvent) == "function")
+			if (not KX.noAttackAnimation) or (not hasFastRemote) then
+				pcall(function()
+					if CombatController and type(CombatController.Attack) == "function" and tool then
+						CombatController:Attack(tool, FakeInput)
+					end
+				end)
+			end
 			KX.suppressHitAnimations(hum)
 
 			pcall(function()
-				if not cachedRegAttack or not cachedRegAttack.Parent then
-					local net = ReplicatedStorage:FindFirstChild("Modules") and ReplicatedStorage.Modules:FindFirstChild("Net")
-					cachedRegAttack = net and net:FindFirstChild("RE/RegisterAttack")
-					cachedSendHits = net and net:FindFirstChild("RE/RegisterHit")
+				if (not cachedRegAttack or not cachedRegAttack.Parent) and ReplicatedStorage:FindFirstChild("Modules") then
+					local netFolder = ReplicatedStorage.Modules:FindFirstChild("Net")
+					if NetModule and type(NetModule.RemoteEvent) == "function" then
+						cachedRegAttack = NetModule:RemoteEvent("RegisterAttack")
+						cachedSendHits = NetModule:RemoteEvent("RegisterHit", true)
+					elseif netFolder then
+						cachedRegAttack = netFolder:FindFirstChild("RE/RegisterAttack")
+						cachedSendHits = netFolder:FindFirstChild("RE/RegisterHit")
+					end
 				end
 				KX.comboIndex = ((tonumber(KX.comboIndex) or 1) % 4) + 1
 				if cachedRegAttack then
@@ -2050,7 +2115,7 @@ do
 					cachedSendHits:FireServer(primaryLimb, extraHits)
 				end
 				if cachedRegAttack then
-					cachedRegAttack:FireServer(0.01, KX.comboIndex)
+					cachedRegAttack:FireServer(0.005, KX.comboIndex)
 				end
 				if GlobalModule and type(GlobalModule.SendHitsToServer) == "function" then
 					GlobalModule.SendHitsToServer(primaryLimb, extraHits)
@@ -2078,15 +2143,16 @@ do
 		KX.lastAimPos = ePart.Position
 
 		local anchorPos = ePart.Position
-		if KX.bringMobs
-			and KX.bringAnchorPos
-			and not WORLD_BOSS_DONT_BRING[enemyModel.Name]
-			and (ePart.Position - KX.bringAnchorPos).Magnitude <= 85 then
-			anchorPos = KX.bringAnchorPos
+		if KX.bringMobs and KX.bringAnchorPos and not WORLD_BOSS_DONT_BRING[enemyModel.Name] then
+			if (ePart.Position - KX.bringAnchorPos).Magnitude <= 140 then
+				anchorPos = KX.bringAnchorPos
+			else
+				KX.bringAnchorPos = ePart.Position
+			end
 		end
 
-		local hoverCF = CFrame.lookAt(anchorPos + Vector3.new(0, 16.5, 0), ePart.Position)
-		if (hrp.Position - hoverCF.Position).Magnitude > 24 then
+		local hoverCF = CFrame.lookAt(anchorPos + Vector3.new(0, 14.5, 0), ePart.Position)
+		if (hrp.Position - hoverCF.Position).Magnitude > 26 then
 			KX.moveToCFrame(hoverCF)
 			return
 		end
@@ -2130,7 +2196,7 @@ do
 			if not WORLD_BOSS_DONT_BRING[enemyModel.Name] then
 				if KX.bringTargetModel ~= enemyModel
 					or not KX.bringAnchorPos
-					or (p.Position - KX.bringAnchorPos).Magnitude > 75
+					or (p.Position - KX.bringAnchorPos).Magnitude > 140
 					or not KX.isModelAlive(KX.bringTargetModel) then
 					KX.bringAnchorPos = p.Position
 					KX.bringTargetModel = enemyModel
@@ -2315,12 +2381,12 @@ do
 		end
 		if spawns and #spawns > 0 then
 			local sp = spawns[((patrolIdx - 1) % #spawns) + 1]
-			local hoverCF = sp * CFrame.new(0, 22, 0)
+			local hoverCF = sp * CFrame.new(0, 18, 0)
 			setStatus(label .. " (Esperando spawn: " .. tostring(mobName) .. ")", KX.phaseText)
 			local reached = KX.moveToCFrame(hoverCF)
 			local hrp = KX.getRootAndHum()
 			if reached or (hrp and (hrp.Position - hoverCF.Position).Magnitude <= 35) then
-				if os.clock() - lastPatrolSwitch >= 2.6 then
+				if os.clock() - lastPatrolSwitch >= 1.35 then
 					lastPatrolSwitch = os.clock()
 					patrolIdx = (patrolIdx % #spawns) + 1
 				end
@@ -2513,7 +2579,8 @@ do
 		local cap = KX.maxLevel
 
 		local targetStat = "Melee"
-		if meleeLv < cap and meleeLv <= (defLv * 2) then
+		local meleeDefRatio = (KX.worldNum == 1) and 3 or 2
+		if meleeLv < cap and (meleeLv <= (defLv * meleeDefRatio) or (KX.worldNum == 1 and defLv >= 300)) then
 			targetStat = "Melee"
 		elseif defLv < cap then
 			targetStat = "Defense"
@@ -2901,13 +2968,55 @@ do
 	}
 
 	local lastStyleCheckClock = 0
+	local lastAbilityUnlockClock = 0
+	local ownedAbilitiesCache = {Geppo = false, Buso = false, Soru = false}
+
 	function KX.getStyleMastery(entry)
 		return math.max(KX.meleeMastery[entry.name] or 0, KX.meleeMastery[entry.alt] or 0)
 	end
 
+	function KX.stepSea1AbilityUnlocks()
+		if not CommF_ or isChooseTeamScreenOpen() then return end
+		if ownedAbilitiesCache.Geppo and ownedAbilitiesCache.Buso and ownedAbilitiesCache.Soru then
+			return
+		end
+		if os.clock() - lastAbilityUnlockClock < 14.0 then return end
+		lastAbilityUnlockClock = os.clock()
+
+		local beli = tonumber(KX.beli) or 0
+		local unlocks = {
+			{key = "Geppo", minBeli = 10000},
+			{key = "Buso",  minBeli = 25000},
+			{key = "Soru",  minBeli = 120000},
+		}
+		for _, ab in ipairs(unlocks) do
+			if not ownedAbilitiesCache[ab.key] then
+				local okChk, chkRes = pcall(function()
+					return CommF_:InvokeServer("BuyHaki", ab.key, true)
+				end)
+				if okChk and chkRes == 2 then
+					ownedAbilitiesCache[ab.key] = true
+				elseif beli >= ab.minBeli then
+					pcall(function()
+						CommF_:InvokeServer("BuyHaki", ab.key)
+					end)
+					local _, chkAfter = pcall(function()
+						return CommF_:InvokeServer("BuyHaki", ab.key, true)
+					end)
+					if chkAfter == 2 then
+						ownedAbilitiesCache[ab.key] = true
+					end
+					return
+				end
+			end
+		end
+	end
+
 	function KX.stepPassiveMeleeRotation()
+		KX.stepSea1AbilityUnlocks()
 		if KX.ownedMelees["Godhuman"] or not CommF_ then return end
-		if os.clock() - lastStyleCheckClock < 15.0 then return end
+		local checkInterval = (KX.currentMeleeCanon == "Combat" or KX.currentMeleeCanon == "None") and 5.0 or 14.0
+		if os.clock() - lastStyleCheckClock < checkInterval then return end
 		lastStyleCheckClock = os.clock()
 
 		KX.scanRealtimeMeleeAndWeapons()
@@ -3118,8 +3227,81 @@ do
 		return nil
 	end
 
+	local SEA1_FAST_BOSS_QUESTS = {
+		{minLvl = 680, questGroup = "FountainQuest", questIndex = 3, levelReq = 675, mobName = "Cyborg", npcFallback = CFrame.new(5263.49, 74.91, 4087.62)},
+		{minLvl = 580, questGroup = "SkyExp2Quest",  questIndex = 3, levelReq = 575, mobName = "Thunder God", npcFallback = CFrame.new(-7033.10, 5590.57, 1353.11)},
+		{minLvl = 515, questGroup = "SkyExp1Quest",  questIndex = 3, levelReq = 500, mobName = "Wysper", npcFallback = CFrame.new(-5949.07, 5467.94, 2086.52)},
+		{minLvl = 430, questGroup = "FishmanQuest",  questIndex = 3, levelReq = 425, mobName = "Fishman Lord", npcFallback = CFrame.new(61122.6, 18.5, 1569.4)},
+		{minLvl = 355, questGroup = "MagmaQuest",    questIndex = 3, levelReq = 350, mobName = "Magma Admiral", npcFallback = CFrame.new(-5313.4, 12.3, 8515.3)},
+		{minLvl = 135, questGroup = "MarineQuest2",  questIndex = 2, levelReq = 130, mobName = "Vice Admiral", npcFallback = CFrame.new(-5039.6, 27.4, 4324.7)},
+		{minLvl = 110, questGroup = "SnowQuest",     questIndex = 3, levelReq = 105, mobName = "Yeti", npcFallback = CFrame.new(1389.8, 87.3, -1298.9)},
+		{minLvl = 25,  questGroup = "JungleQuest",   questIndex = 3, levelReq = 20,  mobName = "The Gorilla King", npcFallback = CFrame.new(-1598.1, 35.6, 153.4)},
+	}
+
+	function KX.tryGetSpawnedSea1BossQuest(hrp, lvl)
+		local hasAnyQ = KX.getActiveQuestInfo(nil, nil)
+		local enemies = Workspace:FindFirstChild("Enemies")
+		if not enemies then return nil end
+
+		local npcPosMap = {}
+		local skyExp1UpperCF = nil
+		if GuideModule and GuideModule.Data and GuideModule.Data.NPCList then
+			for _, nd in pairs(GuideModule.Data.NPCList) do
+				if nd.InternalQuestName and nd.Position then
+					if nd.InternalQuestName == "SkyExp1Quest" and nd.Position.Y > 3500 then
+						skyExp1UpperCF = CFrame.new(nd.Position)
+					else
+						npcPosMap[nd.InternalQuestName] = CFrame.new(nd.Position)
+					end
+				end
+			end
+		end
+
+		for _, b in ipairs(SEA1_FAST_BOSS_QUESTS) do
+			if lvl >= b.minLvl and (lvl - b.levelReq <= 160) then
+				local alreadySameBossQ = false
+				if hasAnyQ then
+					local _, matches = KX.getActiveQuestInfo(b.questGroup, b.mobName)
+					if not matches then
+						return nil
+					end
+					alreadySameBossQ = true
+				end
+				local aliveBoss = KX.findExactBoss({b.mobName}, false)
+				if aliveBoss then
+					local bRoot = KX.getModelRoot(aliveBoss)
+					if bRoot and (alreadySameBossQ or (bRoot.Position - hrp.Position).Magnitude <= 3500) then
+						local npcCF = (b.questGroup == "SkyExp1Quest" and skyExp1UpperCF)
+							or npcPosMap[b.questGroup]
+							or b.npcFallback
+						return {
+							questGroup = b.questGroup,
+							questIndex = b.questIndex,
+							levelReq = b.levelReq,
+							mobName = b.mobName,
+							spawns = {bRoot.CFrame},
+							npcCFrame = npcCF,
+							bossModel = aliveBoss,
+						}
+					end
+				end
+			end
+		end
+		return nil
+	end
+
 	function KX.stepSea1SkyAndFountainFarm(hrp, customLabel)
 		local lvl = tonumber(KX.level) or 1
+
+		-- 0) Opportunistic Sea 1 Boss Quest when a nearby Boss is already spawned (+massive instant XP!)
+		local bossQ = KX.tryGetSpawnedSea1BossQuest(hrp, lvl)
+		if bossQ and KX.ensureQuestAccepted(bossQ, hrp) then
+			local bEnemy = KX.findExactBoss({bossQ.mobName}, false) or bossQ.bossModel
+			if bEnemy and KX.isModelAlive(bEnemy) then
+				KX.engageTarget(bEnemy, nil, customLabel or string.format("👑 Sea 1 Boss [Lv.%d • %s]", lvl, bossQ.mobName), "Melee")
+				return
+			end
+		end
 
 		-- 1) Lv. 1 - 149 -> Accept highest unlocked Sea 1 mission until SkyQuest (Lv. 150) unlocks
 		if lvl < 150 then
@@ -3130,7 +3312,16 @@ do
 			return
 		end
 
-		-- 2) Near the Last Island of Sea 1 (Lv. 625 - 699 -> Fountain City normal quest farm)
+		-- 2) Lv. 250 - 449 -> Fast High-EXP Islands (Colosseum 1.3M -> Magma 2.0M -> Fishman 3.35M) instead of stalling at Dark Master Lv.175!
+		if lvl >= 250 and lvl < 450 then
+			local midQ = KX.getBestLevelQuest()
+			if midQ and KX.ensureQuestAccepted(midQ, hrp) then
+				KX.farmMobSpawns(midQ.mobName, midQ.spawns, customLabel or string.format("⚔️ Sea 1 Turbo [Lv.%d • %s]", lvl, midQ.mobName), "Melee")
+			end
+			return
+		end
+
+		-- 3) Near the Last Island of Sea 1 (Lv. 625 - 699 -> Fountain City normal quest farm)
 		if lvl >= 625 then
 			local fQuest = KX.getSea1SkyOrFountainQuestInfo()
 			if fQuest and KX.ensureQuestAccepted(fQuest, hrp) then
@@ -3140,7 +3331,7 @@ do
 			return
 		end
 
-		-- 3) Lv. 150 - 624 -> Skylands NPCs + Sky Mission (SkyQuest -> SkyExp1Quest -> SkyExp2Quest)
+		-- 4) Lv. 150 - 249 (SkyQuest) & Lv. 450 - 624 (SkyExp1Quest -> SkyExp2Quest) -> Skylands + Misión
 		local skyQuest = KX.getSea1SkyOrFountainQuestInfo()
 		if skyQuest and KX.ensureQuestAccepted(skyQuest, hrp) then
 			local lbl = customLabel or string.format("☁️ Sea 1 Cielo + Misión [Lv.%d • %s]", lvl, skyQuest.mobName)
@@ -3157,15 +3348,6 @@ do
 					local bRoot = KX.getModelRoot(bonusSkyMob)
 					if bRoot and bRoot.Position.Y > 3500 then
 						KX.engageTarget(bonusSkyMob, SEA1_UPPER_SKY_MOBS_SET, lbl .. " (Bonus XP)", "Melee")
-						return
-					end
-				end
-			elseif lvl >= 150 and lvl < 450 then
-				local bonusLowSkyMob = KX.findNearestAliveFromSet(SEA1_LOWER_SKY_MOBS_SET)
-				if bonusLowSkyMob then
-					local bRoot = KX.getModelRoot(bonusLowSkyMob)
-					if bRoot and bRoot.Position.Y < 2000 then
-						KX.engageTarget(bonusLowSkyMob, SEA1_LOWER_SKY_MOBS_SET, lbl .. " (Bonus XP)", "Melee")
 						return
 					end
 				end
@@ -5982,13 +6164,13 @@ do
 	end)
 
 	local function getFastAttackLabelText(interval)
-		interval = tonumber(interval) or 0.042
-		if interval <= 0.032 then
-			return "⚡ Fast Attack : 💥 Turbo (0.028s) [Click]"
-		elseif interval >= 0.055 then
-			return "⚡ Fast Attack : ⚡ Rápido (0.065s) [Click]"
+		interval = tonumber(interval) or 0.020
+		if interval <= 0.016 then
+			return "⚡ Fast Attack : ⚡⚡ Hyper (0.014s) [Click]"
+		elseif interval >= 0.032 then
+			return "⚡ Fast Attack : 🔥 Ultra (0.038s) [Click]"
 		end
-		return "⚡ Fast Attack : 🔥 Ultra Fast (0.042s) [Click]"
+		return "⚡ Fast Attack : 💥 Turbo (0.020s) [Click]"
 	end
 
 	local FastAttackBtn = Instance.new("TextButton")
@@ -6011,13 +6193,13 @@ do
 	faStroke.Parent = FastAttackBtn
 
 	connect(FastAttackBtn.MouseButton1Click, function()
-		local cur = tonumber(KX.attackInterval) or 0.042
-		if cur <= 0.032 then
-			KX.attackInterval = 0.065
-		elseif cur >= 0.055 then
-			KX.attackInterval = 0.042
+		local cur = tonumber(KX.attackInterval) or 0.020
+		if cur <= 0.016 then
+			KX.attackInterval = 0.038
+		elseif cur >= 0.032 then
+			KX.attackInterval = 0.020
 		else
-			KX.attackInterval = 0.028
+			KX.attackInterval = 0.014
 		end
 		FastAttackBtn.Text = getFastAttackLabelText(KX.attackInterval)
 		saveConfig()
@@ -6350,6 +6532,20 @@ connect(RunService.Stepped, function()
 	end
 end)
 
+-- Continuous Bring-Mob Physics Pin (keeps clustered mobs locked between frames without rubberband!)
+connect(RunService.Heartbeat, function()
+	if not isAlive() or not KX.startupReady or not KX.autoFarm or not KX.bringMobs then
+		return
+	end
+	if not KX.bringAnchorPos or not KX.lastAimEnemy or not KX.isModelAlive(KX.lastAimEnemy) then
+		return
+	end
+	local hrp = KX.getRootAndHum()
+	if hrp and (hrp.Position - KX.bringAnchorPos).Magnitude <= 110 then
+		KX.bringClusterMobs(KX.bringAnchorPos, KX.bringClusterSet)
+	end
+end)
+
 -- Live Inventory & Quest Scanner Loop
 task.spawn(function()
 	while isAlive() do
@@ -6360,7 +6556,7 @@ task.spawn(function()
 	end
 end)
 
--- High-Frequency Ultra Fast-Click + Bring-Mob Combat Loop (~24 ticks/sec + multi-target burst)
+-- High-Frequency Heartbeat-Synced Turbo Fast-Click + Bring-Mob Combat Loop
 task.spawn(function()
 	while isAlive() do
 		if KX.startupReady and KX.autoFarm and KX.lastAimEnemy then
@@ -6371,14 +6567,17 @@ task.spawn(function()
 					local ePart = KX.getModelRoot(enemy)
 					if hrp and hum and ePart then
 						local anchorPos = ePart.Position
-						if KX.bringMobs
-							and KX.bringAnchorPos
-							and (ePart.Position - KX.bringAnchorPos).Magnitude <= 85 then
-							anchorPos = KX.bringAnchorPos
+						if KX.bringMobs and KX.bringAnchorPos and not WORLD_BOSS_DONT_BRING[enemy.Name] then
+							if (ePart.Position - KX.bringAnchorPos).Magnitude <= 140 then
+								anchorPos = KX.bringAnchorPos
+							else
+								KX.bringAnchorPos = ePart.Position
+								anchorPos = ePart.Position
+							end
 							KX.bringClusterMobs(KX.bringAnchorPos, KX.bringClusterSet)
 						end
-						local hoverPos = anchorPos + Vector3.new(0, 16.5, 0)
-						if (hrp.Position - hoverPos).Magnitude <= 26 then
+						local hoverPos = anchorPos + Vector3.new(0, 14.5, 0)
+						if (hrp.Position - hoverPos).Magnitude <= 34 then
 							KX.ensureAntiFall(hrp)
 							hrp.CFrame = CFrame.lookAt(hoverPos, ePart.Position)
 							local ch = LocalPlayer.Character
@@ -6389,11 +6588,12 @@ task.spawn(function()
 				else
 					KX.lastAimEnemy = nil
 					KX.lastAimPart = nil
+					KX.bringTargetModel = nil
 				end
 			end)
-			task.wait(math.clamp(tonumber(KX.attackInterval) or 0.042, 0.025, 0.15))
+			RunService.Heartbeat:Wait()
 		else
-			task.wait(0.12)
+			task.wait(0.10)
 		end
 	end
 end)
