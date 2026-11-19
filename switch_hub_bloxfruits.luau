@@ -5232,7 +5232,29 @@ do
 		CardDojo,
 		"autoDragonHunter",
 		"Auto Quest Dragon Hunter",
-		"Acepta misiones de caza en el Dojo, tala árboles o derrota Hydra NPCs y recoge Blaze Embers"
+		"Acepta misiones de caza en el Dojo, tala árboles o derrota Hydra NPCs y recoge Blaze Embers",
+		function()
+			Others.lastHunterPoll = 0
+			Others.hunterPollBusy = false
+			Others.hunterTask = nil
+			Others.hunterText = ""
+			Others.hunterCancelActive = false
+			Others.hunterLocked = false
+			Others.hunterNeedRequest = false
+			Others.hunterHadActiveQuest = false
+			Others.hunterQuestTakenAt = 0
+			Others.hunterRequestAt = 0
+			Others.hunterLockedMob = nil
+			Others.activeTree = nil
+			Others.activeTreeSince = 0
+			Others.activeTreeAttackAt = 0
+			Others.treeCooldown = {}
+			Others.ignoredEmbers = {}
+			Others.chasedEmberTarget = nil
+			Others.chasedEmberSince = 0
+			Others.emberQueue = {}
+			Others.treeBrokenCount = 0
+		end
 	)
 
 	-- 2) BERRY COLLECTOR & HOP
@@ -8425,21 +8447,42 @@ do
 
 	local HYDRA_TREE_POINTS = {
 		Vector3.new(5840.0, 1208.5, 860.0),
+		Vector3.new(5760.0, 1208.5, 780.0),
 		Vector3.new(5285.0, 1005.0, 390.0),
 		Vector3.new(5365.0, 1005.0, 260.0),
 		Vector3.new(5480.0, 1005.0, 180.0),
+		Vector3.new(5060.0, 1005.0, 315.0),
 		Vector3.new(5610.0, 1012.0, -60.0),
 		Vector3.new(5190.0, 604.0, 290.0),
+		Vector3.new(4920.0, 610.0, 410.0),
 	}
 
 	Others.emberQueue = {}
 	Others.lastDojoPoll = 0
 	Others.dojoState = nil
 	Others.lastHunterPoll = 0
+	Others.hunterPollBusy = false
 	Others.hunterText = ""
-	Others.hunterNeedRequest = true
+	Others.hunterTask = nil
+	Others.hunterCancelActive = false
+	Others.hunterLocked = false
+	Others.hunterNeedRequest = false
+	Others.hunterHadActiveQuest = false
+	Others.hunterQuestTakenAt = 0
+	Others.hunterRequestAt = 0
+	Others.hunterLockedMob = nil
 	Others.treeIdx = 1
 	Others.lastTreeSwitch = 0
+	Others.activeTree = nil
+	Others.activeTreeSince = 0
+	Others.activeTreeAttackAt = 0
+	Others.treeCooldown = {}
+	Others.ignoredEmbers = {}
+	Others.chasedEmberTarget = nil
+	Others.chasedEmberSince = 0
+	Others.lastTreeSkillAt = 0
+	Others.treeSkillIdx = 1
+	Others.treeBrokenCount = 0
 	Others.lastBoatBuy = 0
 
 	Others.lastBerryClaimClock = 0
@@ -8516,35 +8559,82 @@ do
 		return fallbackPos
 	end
 
-	-- Finds any spawned BlazeEmber in Workspace or from RE/DragonDojoEmber queue
+	local function isValidBlazeEmberName(low)
+		if low:find("blazeember") or low:find("blaze_ember") or low:find("blaze ember") then
+			return true
+		end
+		if not low:find("ember") then
+			return false
+		end
+		if low:find("member") or low:find("remember") or low:find("november") or low:find("december") or low:find("september") then
+			return false
+		end
+		if low:find("azure") or low:find("blue") or low:find("soul") or low:find("kitsune") or low:find("coal") or low:find("chamber") then
+			return false
+		end
+		return true
+	end
+
+	-- Finds any active Hydra BlazeEmber in Workspace or valid entry from RE/DragonDojoEmber queue
 	function Others.findActiveBlazeEmber(refPos)
+		local now = os.clock()
+		for obj, exp in pairs(Others.ignoredEmbers) do
+			if now >= exp or (typeof(obj) == "Instance" and not obj.Parent) then
+				Others.ignoredEmbers[obj] = nil
+			end
+		end
+
+		local bestPos, bestPart, bestObj = nil, nil, nil
+		local bestDist = math.huge
 		for _, folder in ipairs({Workspace, Workspace:FindFirstChild("_WorldOrigin"), Workspace:FindFirstChild("Effects")}) do
 			if folder then
 				for _, obj in ipairs(folder:GetChildren()) do
-					local low = obj.Name:lower()
-					if low:find("blazeember") or (low:find("ember") and not low:find("member")) then
-						local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart")
-						if part then
-							return part.Position, part
-						end
-						local ok, cf = pcall(function() return obj:GetPivot() end)
-						if ok and cf then
-							return cf.Position, nil
+					if not (Others.ignoredEmbers[obj] and now < Others.ignoredEmbers[obj]) then
+						local low = obj.Name:lower()
+						if isValidBlazeEmberName(low) then
+							local part = obj:IsA("BasePart") and obj or obj:FindFirstChildWhichIsA("BasePart")
+							local pos = nil
+							if part then
+								pos = part.Position
+							else
+								local ok, cf = pcall(function() return obj:GetPivot() end)
+								if ok and cf then
+									pos = cf.Position
+								end
+							end
+							if pos and (pos - DRAGON_HUNTER_POS).Magnitude <= 3500 then
+								local d = refPos and (refPos - pos).Magnitude or 0
+								if d < bestDist then
+									bestDist = d
+									bestPos = pos
+									bestPart = part
+									bestObj = obj
+								end
+							end
 						end
 					end
 				end
 			end
 		end
+		if bestPos then
+			return bestPos, bestPart, bestObj
+		end
 
 		for i = #Others.emberQueue, 1, -1 do
 			local item = Others.emberQueue[i]
-			if os.clock() > item.exp or (refPos and (refPos - item.pos).Magnitude <= 8) then
+			if not item.seenAt then item.seenAt = now end
+			local maxExp = math.min(item.exp or (now + 8.5), item.seenAt + 8.5)
+			local farFromHydra = (not item.pos) or (item.pos - DRAGON_HUNTER_POS).Magnitude > 3500
+			local reachedSpot = refPos and item.pos and (refPos - item.pos).Magnitude <= 18
+			local timedOutChase = item.chaseSince and (now - item.chaseSince >= 3.0)
+			if farFromHydra or now > maxExp or reachedSpot or timedOutChase then
 				table.remove(Others.emberQueue, i)
 			else
-				return item.pos, nil
+				if not item.chaseSince then item.chaseSince = now end
+				return item.pos, nil, item
 			end
 		end
-		return nil, nil
+		return nil, nil, nil
 	end
 
 	-- Navigates into Sea Danger Zone (for Yellow / Green / Red Dojo Belt quests)
@@ -8771,28 +8861,582 @@ do
 		end
 	end
 
-	-- 2) AUTO QUEST DRAGON HUNTER (BLAZE EMBERS)
+	local HYDRA_ISLAND_CENTER = Vector3.new(5350.0, 900.0, 350.0)
+
+	local function collectDragonStrings(val, out, depth)
+		depth = depth or 0
+		if depth > 4 or val == nil then return end
+		local t = type(val)
+		if t == "string" then
+			if val ~= "" then
+				table.insert(out, val)
+			end
+		elseif t == "table" then
+			-- Prefer descriptive keys first, then scan remaining entries safely
+			for _, k in ipairs({"Text", "Description", "Title", "Quest", "QuestName", "CurrentQuest", "CancelQuest", "Message", "Header", "Status", "Objective", "Locked"}) do
+				if val[k] ~= nil then
+					collectDragonStrings(val[k], out, depth + 1)
+				end
+			end
+			for k, v in pairs(val) do
+				if type(k) == "number" or (k ~= "Text" and k ~= "Description" and k ~= "Title" and k ~= "Quest" and k ~= "QuestName" and k ~= "CurrentQuest" and k ~= "CancelQuest" and k ~= "Message" and k ~= "Header" and k ~= "Status" and k ~= "Objective" and k ~= "Locked") then
+					collectDragonStrings(v, out, depth + 1)
+				end
+			end
+		end
+	end
+
+	local function readDragonHunterHUD()
+		local parts = {}
+		local progCur, progMax = nil, nil
+		local isCompleteHUD = false
+		pcall(function()
+			local pgui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+			if not pgui then return end
+
+			local function scanGui(root)
+				if not root then return end
+				for _, d in ipairs(root:GetDescendants()) do
+					if (d:IsA("TextLabel") or d:IsA("TextBox")) and d.Visible then
+						local txt = d.Text
+						if txt and txt ~= "" then
+							local low = txt:lower()
+							if low:find("enforcer") or low:find("venomous") or low:find("assailant") or low:find("tree") or low:find("dragon") or low:find("blaze ember") or low:find("head back") then
+								table.insert(parts, txt)
+								local c, m = txt:match("(%d+)%s*/%s*(%d+)")
+								if c and m then
+									progCur, progMax = tonumber(c), tonumber(m)
+									if progCur and progMax and progMax > 0 and progCur >= progMax then
+										isCompleteHUD = true
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+
+			local tqf = pgui:FindFirstChild("TrackedQuestFrame")
+			if tqf then
+				local fr = tqf:FindFirstChild("Frame")
+				if not fr or fr.Visible then
+					scanGui(tqf)
+				end
+			end
+			local main = pgui:FindFirstChild("Main")
+			if main then
+				local qf = main:FindFirstChild("Quest")
+				if qf and qf.Visible then
+					scanGui(qf)
+				end
+			end
+		end)
+		return table.concat(parts, " | "), progCur, progMax, isCompleteHUD
+	end
+
+	local function parseDragonTask(txt)
+		if not txt or txt == "" then return nil end
+		local low = txt:lower()
+		if low:find("venomous") or low:find("assailant") then
+			return "Venomous"
+		elseif low:find("enforcer") then
+			return "Enforcer"
+		elseif low:find("tree") then
+			return "Trees"
+		end
+		return nil
+	end
+
+	local function isDragonCompleteText(txt)
+		if not txt or txt == "" then return false end
+		local low = txt:lower()
+		-- "Your <...> quest will be abandoned! Would you like..." means an ACTIVE quest, NOT completed!
+		local hasCancelPrompt = low:find("will be abandoned") or low:find("cancel")
+		if low:find("head back") or low:find("return to the dojo") or low:find("return to dragon") or low:find("complete more") or low:find("quest complete") or low:find("completed") then
+			return true
+		end
+		local c, m = txt:match("(%d+)%s*/%s*(%d+)")
+		if c and m and tonumber(c) and tonumber(m) and tonumber(m) > 0 and tonumber(c) >= tonumber(m) then
+			return true
+		end
+		if not hasCancelPrompt and low:find("would you like") and not parseDragonTask(txt) then
+			return true
+		end
+		return false
+	end
+
+	local function applyDragonHunterResponse(reqRes, chkRes)
+		local hudText, _, _, hudComplete = readDragonHunterHUD()
+		local strs = {}
+		collectDragonStrings(reqRes, strs, 0)
+		collectDragonStrings(chkRes, strs, 0)
+		local combined = table.concat(strs, " | ")
+		if hudText ~= "" then
+			combined = combined ~= "" and (combined .. " | " .. hudText) or hudText
+		end
+
+		local cancelActive = false
+		if type(chkRes) == "table" and chkRes.CancelQuest ~= nil and chkRes.CancelQuest ~= false and tostring(chkRes.CancelQuest) ~= "" then
+			cancelActive = true
+		elseif type(reqRes) == "table" and reqRes.CancelQuest ~= nil and reqRes.CancelQuest ~= false and tostring(reqRes.CancelQuest) ~= "" then
+			cancelActive = true
+		elseif combined:lower():find("will be abandoned") then
+			cancelActive = true
+		end
+
+		local taskFound = parseDragonTask(combined) or parseDragonTask(hudText)
+		local low = combined:lower()
+		local isLocked = (not cancelActive) and (not taskFound) and (low:find("locked") or low:find("prove you're worthy") or low:find("yellow belt") or low:find("listen well"))
+
+		if isLocked then
+			Others.hunterLocked = true
+			Others.hunterNeedRequest = false
+			Others.hunterCancelActive = false
+			Others.hunterTask = nil
+			Others.hunterText = combined
+			return
+		end
+
+		Others.hunterLocked = false
+		Others.hunterCancelActive = cancelActive
+
+		if combined ~= "" then
+			Others.hunterText = combined
+		end
+
+		if taskFound then
+			if Others.hunterTask ~= taskFound then
+				Others.hunterLockedMob = nil
+				Others.activeTree = nil
+			end
+			Others.hunterTask = taskFound
+			Others.hunterHadActiveQuest = true
+		end
+
+		local isDone = hudComplete or isDragonCompleteText(combined)
+		if isDone then
+			Others.hunterNeedRequest = true
+			Others.hunterTask = nil
+			Others.hunterLockedMob = nil
+			Others.activeTree = nil
+			return
+		end
+
+		if cancelActive or parseDragonTask(hudText) then
+			Others.hunterNeedRequest = false
+			Others.hunterHadActiveQuest = true
+		elseif reqRes ~= nil and taskFound then
+			-- Immediately after RequestQuest returned a valid task, wait cleanly before re-polling
+			Others.hunterNeedRequest = false
+			Others.hunterHadActiveQuest = true
+		else
+			-- Only clear active quest & request a new one if server confirms NO CancelQuest AND HUD has no active hunt
+			if Others.hunterTask == nil or (os.clock() - (Others.hunterQuestTakenAt or 0) >= 2.0) then
+				Others.hunterTask = nil
+				Others.hunterNeedRequest = true
+				Others.hunterLockedMob = nil
+				Others.activeTree = nil
+			end
+		end
+	end
+
+	local function syncDragonHunterQuest(hunterRF, blocking)
+		if not hunterRF then return end
+		if blocking then
+			local ok, chkRes = pcall(function()
+				return hunterRF:InvokeServer({Context = "Check"})
+			end)
+			Others.lastHunterPoll = os.clock()
+			if ok and chkRes ~= nil then
+				applyDragonHunterResponse(nil, chkRes)
+			elseif Others.hunterTask == nil and not Others.hunterCancelActive then
+				local hudText = readDragonHunterHUD()
+				local hTask = parseDragonTask(hudText)
+				if hTask then
+					Others.hunterTask = hTask
+					Others.hunterNeedRequest = false
+				else
+					Others.hunterNeedRequest = true
+				end
+			end
+			return
+		end
+
+		if Others.hunterPollBusy then return end
+		Others.hunterPollBusy = true
+		Others.lastHunterPoll = os.clock()
+		task.spawn(function()
+			local ok, chkRes = pcall(function()
+				return hunterRF:InvokeServer({Context = "Check"})
+			end)
+			Others.lastHunterPoll = os.clock()
+			if ok and chkRes ~= nil and S.autoDragonHunter then
+				applyDragonHunterResponse(nil, chkRes)
+			end
+			Others.hunterPollBusy = false
+		end)
+	end
+
+	local function isHydraTreeDestroyed(model)
+		if not model or not model.Parent then return true end
+		local okAttr, brk, dst, hp = pcall(function()
+			return model:GetAttribute("Broken"), model:GetAttribute("Destroyed"), model:GetAttribute("Health")
+		end)
+		if okAttr then
+			if brk == true or dst == true or (type(hp) == "number" and hp <= 0) then
+				return true
+			end
+		end
+		for _, ch in ipairs(model:GetChildren()) do
+			if ch:IsA("BoolValue") then
+				local n = ch.Name:lower()
+				if (n == "broken" or n == "destroyed") and ch.Value == true then
+					return true
+				end
+			elseif ch:IsA("NumberValue") or ch:IsA("IntValue") then
+				local n = ch.Name:lower()
+				if (n == "health" or n == "hp") and ch.Value <= 0 then
+					return true
+				end
+			end
+		end
+		local hasSolidPart = false
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") then
+				if d.Transparency < 0.85 and d.Size.Magnitude >= 2.2 then
+					hasSolidPart = true
+					break
+				end
+			end
+		end
+		return not hasSolidPart
+	end
+
+	local function scoreHydraTreeCandidate(model, hrpPos, forceTaggedScore)
+		if not model or not model.Parent then return nil end
+		local cd = Others.treeCooldown[model]
+		if cd and os.clock() < cd then return nil end
+		if isHydraTreeDestroyed(model) then return nil end
+
+		local mLow = model.Name:lower()
+		local pNameLow = model.Parent and model.Parent.Name:lower() or ""
+		if mLow:find("wall") or mLow:find("floor") or mLow:find("ground") or mLow:find("terrain") or mLow:find("roof") or mLow:find("rock") or mLow:find("stone") or mLow:find("cliff") or mLow:find("water") or mLow:find("stair") or mLow:find("bridge") or mLow:find("gate") or mLow:find("door") or mLow:find("house") or mLow:find("dojo") or mLow:find("temple") or mLow:find("statue") or mLow:find("pillar") or mLow:find("road") or mLow:find("lantern") or mLow:find("lamp") or mLow:find("chest") or mLow:find("npc") or mLow:find("boat") or mLow:find("ship") or mLow:find("cannon") then
+			return nil
+		end
+
+		local hasMarker = false
+		local hasDestructibleMeta = (forceTaggedScore and forceTaggedScore > 0) or false
+		local hasTreeName = mLow:find("tree") or mLow:find("bamboo") or mLow:find("sakura") or mLow:find("blossom") or mLow:find("cherry") or mLow:find("bush") or mLow:find("plant") or pNameLow:find("tree") or pNameLow:find("bamboo") or pNameLow:find("breakable") or pNameLow:find("destruct")
+
+		pcall(function()
+			local attrs = model:GetAttributes()
+			if attrs["Breakable"] ~= nil or attrs["Destructible"] ~= nil or attrs["Health"] ~= nil or attrs["MaxHealth"] ~= nil or attrs["Broken"] ~= nil or attrs["Destroyed"] ~= nil or attrs["DragonHunter"] ~= nil then
+				hasDestructibleMeta = true
+			end
+		end)
+
+		local trunkPart = nil
+		local bestPartScore = -1
+		local lowestSolidY = math.huge
+		local fallbackPart = nil
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("Highlight") or d:IsA("SelectionBox") or d:IsA("BillboardGui") or d:IsA("Fire") then
+				hasMarker = true
+			elseif (d:IsA("BoolValue") or d:IsA("NumberValue") or d:IsA("IntValue")) then
+				local dn = d.Name:lower()
+				if dn == "health" or dn == "hp" or dn == "breakable" or dn == "destructible" or dn == "broken" or dn == "destroyed" then
+					hasDestructibleMeta = true
+				end
+			elseif d:IsA("BasePart") then
+				local sz = d.Size
+				if sz.X > 75 or sz.Z > 75 or sz.Y > 120 then
+					return nil
+				end
+				if d.Transparency < 0.85 and sz.Magnitude >= 2.2 then
+					local dn = d.Name:lower()
+					local pScore = 0
+					if dn:find("trunk") or dn:find("wood") or dn:find("stem") or dn:find("log") or dn:find("bamboo") then
+						pScore = 50
+					elseif model:IsA("Model") and model.PrimaryPart == d then
+						pScore = 30
+					elseif d.CanCollide then
+						pScore = 15
+					end
+					if pScore > bestPartScore or (pScore == bestPartScore and d.Position.Y < lowestSolidY) then
+						bestPartScore = pScore
+						lowestSolidY = d.Position.Y
+						trunkPart = d
+					end
+					if not fallbackPart then
+						fallbackPart = d
+					end
+				end
+			end
+		end
+
+		trunkPart = trunkPart or fallbackPart
+		if not trunkPart then return nil end
+
+		local pos = trunkPart.Position
+		if pos.Y < 35 or pos.Y > 1550 or (pos - HYDRA_ISLAND_CENTER).Magnitude > 2600 then
+			return nil
+		end
+
+		if not hasMarker and not hasDestructibleMeta and not hasTreeName then
+			return nil
+		end
+
+		local score = forceTaggedScore or 0
+		if hasMarker then score = score + 1000 end
+		if pNameLow:find("breakable") or pNameLow:find("destruct") or pNameLow:find("dragon") or pNameLow:find("dojo") then
+			score = score + 650
+		end
+		if hasDestructibleMeta then score = score + 500 end
+		if mLow:find("bamboo") or mLow:find("sakura") or mLow:find("cherry") or mLow:find("blossom") or mLow:find("tree") then
+			score = score + 250
+		elseif hasTreeName then
+			score = score + 120
+		end
+		if trunkPart.CanCollide then score = score + 40 end
+
+		local dist = (hrpPos - pos).Magnitude
+		score = score - (dist / 25)
+		return score, trunkPart, pos, hasMarker or hasDestructibleMeta
+	end
+
+	local function findSpecificHydraTree(hrpPos)
+		local now = os.clock()
+		for mdl, exp in pairs(Others.treeCooldown) do
+			if now >= exp or not mdl or not mdl.Parent then
+				Others.treeCooldown[mdl] = nil
+			end
+		end
+
+		local bestScore = -math.huge
+		local bestModel, bestPart, bestPos, bestMarked = nil, nil, nil, false
+		local seen = {}
+
+		local function considerCandidate(obj, taggedBonus)
+			local mdl = obj:IsA("Model") and obj or obj:FindFirstAncestorOfClass("Model")
+			if not mdl or mdl == Workspace or mdl == Workspace:FindFirstChild("Map") or seen[mdl] then
+				return
+			end
+			seen[mdl] = true
+			local sc, part, pos, marked = scoreHydraTreeCandidate(mdl, hrpPos, taggedBonus)
+			if sc and sc > bestScore then
+				bestScore = sc
+				bestModel = mdl
+				bestPart = part
+				bestPos = pos
+				bestMarked = marked
+			end
+		end
+
+		-- 1) Dynamic CollectionService scan for Breakable / Destructible / Tree tags
+		pcall(function()
+			local allTags = CS:GetAllTags()
+			for _, tag in ipairs(allTags) do
+				local tl = tag:lower()
+				if tl:find("tree") or tl:find("break") or tl:find("destruct") or tl:find("bamboo") or tl:find("dragon") or tl:find("dojo") or tl:find("hydra") then
+					for _, inst in ipairs(CS:GetTagged(tag)) do
+						considerCandidate(inst, 750)
+					end
+				end
+			end
+		end)
+
+		-- 2) Hydra Island Map scan (Waterfall / Hydra folders + highlighted quest trees)
+		local map = Workspace:FindFirstChild("Map")
+		if map then
+			local scanRoots = {}
+			local wf = map:FindFirstChild("Waterfall")
+			if wf then table.insert(scanRoots, wf) end
+			for _, child in ipairs(map:GetChildren()) do
+				if child ~= wf then
+					local cn = child.Name:lower()
+					if cn:find("hydra") or cn:find("dojo") or cn:find("dragon") or cn:find("tree") or cn:find("bamboo") or cn:find("breakable") then
+						table.insert(scanRoots, child)
+					else
+						local ok, cf = pcall(function() return child:GetPivot() end)
+						if ok and cf and (cf.Position - HYDRA_ISLAND_CENTER).Magnitude <= 2800 then
+							table.insert(scanRoots, child)
+						end
+					end
+				end
+			end
+
+			for _, root in ipairs(scanRoots) do
+				for _, desc in ipairs(root:GetDescendants()) do
+					if desc:IsA("Highlight") or desc:IsA("SelectionBox") then
+						if desc.Parent then
+							considerCandidate(desc.Parent, 1000)
+						end
+					elseif desc:IsA("Model") then
+						local dl = desc.Name:lower()
+						local pl = desc.Parent and desc.Parent.Name:lower() or ""
+						if dl:find("tree") or dl:find("bamboo") or dl:find("sakura") or dl:find("blossom") or dl:find("cherry") or dl:find("bush") or dl:find("plant") or dl:find("breakable") or pl:find("tree") or pl:find("bamboo") or pl:find("breakable") or pl:find("destruct") then
+							considerCandidate(desc, 0)
+						end
+					end
+				end
+			end
+		end
+
+		return bestModel, bestPart, bestPos, bestMarked
+	end
+
+	local TREE_SKILL_SEQUENCE = {
+		{cat = "Blox Fruit", keys = {Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C}},
+		{cat = "Sword",      keys = {Enum.KeyCode.Z, Enum.KeyCode.X}},
+		{cat = "Melee",      keys = {Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C}},
+		{cat = "Gun",        keys = {Enum.KeyCode.Z, Enum.KeyCode.X}},
+	}
+
+	local function castDragonTreeBreaker(hrp, aimPos)
+		if not hrp or not hrp.Parent then return end
+		pcall(function()
+			hrp.CFrame = CFrame.lookAt(hrp.Position, Vector3.new(aimPos.X, aimPos.Y, aimPos.Z))
+		end)
+
+		local primaryCat = S.masteryPriority and S.masteryCategory or "Blox Fruit"
+		performNormalAttack(primaryCat, nil)
+
+		if not Others.treeCastBusy and (os.clock() - (Others.lastTreeSkillAt or 0) >= 0.35) then
+			Others.lastTreeSkillAt = os.clock()
+			Others.treeCastBusy = true
+			task.spawn(function()
+				local flat = {}
+				for _, entry in ipairs(TREE_SKILL_SEQUENCE) do
+					for _, kc in ipairs(entry.keys) do
+						table.insert(flat, {cat = entry.cat, kc = kc})
+					end
+				end
+				for attempt = 1, #flat do
+					local idx = ((Others.treeSkillIdx - 1 + attempt - 1) % #flat) + 1
+					local pick = flat[idx]
+					local tool = equipWeaponType(pick.cat)
+					if tool then
+						Others.treeSkillIdx = (idx % #flat) + 1
+						local cam = Workspace.CurrentCamera
+						local savedCam = cam and cam.CFrame
+						pcall(function()
+							if cam and hrp and hrp.Parent then
+								cam.CFrame = CFrame.lookAt(hrp.Position + Vector3.new(0, 3, 0), aimPos)
+							end
+						end)
+						if VirtualInputManager then
+							pcall(function() VirtualInputManager:SendKeyEvent(true, pick.kc, false, game) end)
+							task.wait(0.05)
+							pcall(function() VirtualInputManager:SendKeyEvent(false, pick.kc, false, game) end)
+						end
+						pcall(function()
+							if cam and savedCam then
+								cam.CFrame = savedCam
+							end
+						end)
+						break
+					end
+				end
+				pcall(function()
+					local bt = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("BreakTree")
+					if bt and bt:IsA("RemoteEvent") then
+						bt:FireServer(aimPos)
+					end
+				end)
+				Others.treeCastBusy = false
+			end)
+		end
+	end
+
+	local function engageDragonHunterTarget(mobName, fallbackCF, patrolKey, searchMsg)
+		Others.activeTree = nil
+		Others.activeTreeAttackAt = 0
+		local mSet = {[mobName] = true}
+		local mob = Others.hunterLockedMob
+		local mobHum = mob and mob.Parent and mob:FindFirstChildOfClass("Humanoid")
+		local mobHrp = mob and mob.Parent and (mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChild("Torso"))
+		if not mob or not mob.Parent or not mobHum or mobHum.Health <= 0 or not mobHrp or mob.Name:gsub("%s*%[.-%]%s*", "") ~= mobName then
+			Others.hunterLockedMob = nil
+			mob = findAliveEnemyFromSet(mSet)
+			if mob then
+				Others.hunterLockedMob = mob
+			end
+		end
+		if mob then
+			engageEnemy(mob, mSet, "🐉 Dragon Hunter")
+		else
+			local sp = collectSpawnsForSet(mSet)
+			if #sp == 0 then sp = {fallbackCF} end
+			setStatus(searchMsg)
+			patrolAroundSpawns(patrolKey, sp)
+		end
+	end
+
+	-- 2) AUTO QUEST DRAGON HUNTER (NPCs, SPECIFIC TREES & BLAZE EMBERS)
 	function Others.stepDragonHunter(hrp)
 		if getCurrentSeaNumber() ~= 3 then
 			setStatus("⚠️ Auto Quest Dragon Hunter requiere estar en Sea 3 (Hydra Island)")
 			return
 		end
 
-		-- Always grab spawned Blaze Embers immediately before they fly away!
-		local emberPos, emberPart = Others.findActiveBlazeEmber(hrp.Position)
+		-- 1) Grab nearby active Hydra Blaze Embers immediately (with anti-stuck watchdog)
+		local emberPos, emberPart, emberObj = Others.findActiveBlazeEmber(hrp.Position)
 		if emberPos then
-			setStatus("🔥 Dragon Hunter: ¡Recogiendo Blaze Ember!")
-			local reached = moveToCFrame(CFrame.new(emberPos))
-			if reached or (hrp.Position - emberPos).Magnitude <= 16 then
-				hrp.CFrame = CFrame.new(emberPos)
-				if emberPart and firetouchinterest then
-					pcall(function()
-						firetouchinterest(hrp, emberPart, 0)
-						firetouchinterest(hrp, emberPart, 1)
-					end)
+			if Others.chasedEmberTarget ~= emberObj then
+				Others.chasedEmberTarget = emberObj
+				Others.chasedEmberSince = os.clock()
+			elseif os.clock() - (Others.chasedEmberSince or os.clock()) >= 6.5 then
+				if typeof(emberObj) == "Instance" then
+					Others.ignoredEmbers[emberObj] = os.clock() + 15
+				elseif type(emberObj) == "table" then
+					for qi = #Others.emberQueue, 1, -1 do
+						if Others.emberQueue[qi] == emberObj then
+							table.remove(Others.emberQueue, qi)
+						end
+					end
+				end
+				Others.chasedEmberTarget = nil
+				Others.chasedEmberSince = 0
+				emberPos = nil
+			end
+
+			if emberPos then
+				setStatus("🔥 Dragon Hunter: ¡Recogiendo Blaze Ember!")
+				local reached = moveToCFrame(CFrame.new(emberPos))
+				if reached or (hrp.Position - emberPos).Magnitude <= 16 then
+					hrp.AssemblyLinearVelocity = Vector3.zero
+					hrp.CFrame = CFrame.new(emberPos)
+					if emberPart and firetouchinterest then
+						pcall(function()
+							firetouchinterest(hrp, emberPart, 0)
+							firetouchinterest(hrp, emberPart, 1)
+						end)
+					end
+					-- Clear queued fallback entries near pickup spot so we never bounce back to an old spawn coordinate
+					for qi = #Others.emberQueue, 1, -1 do
+						local qItem = Others.emberQueue[qi]
+						if qItem.pos and (qItem.pos - emberPos).Magnitude <= 120 then
+							table.remove(Others.emberQueue, qi)
+						end
+					end
+					if not emberPart then
+						Others.chasedEmberTarget = nil
+					end
+					Others.lastHunterPoll = 0
+				end
+				return
+			end
+		elseif Others.chasedEmberTarget ~= nil then
+			-- Ember was just collected or despawned; purge stale fallback coordinates and check quest completion immediately
+			Others.chasedEmberTarget = nil
+			Others.chasedEmberSince = 0
+			for qi = #Others.emberQueue, 1, -1 do
+				local qItem = Others.emberQueue[qi]
+				if qItem.pos and (qItem.pos - hrp.Position).Magnitude <= 140 then
+					table.remove(Others.emberQueue, qi)
 				end
 			end
-			return
+			Others.lastHunterPoll = 0
 		end
 
 		local hunterRF = getNetRemote("RF/DragonHunter")
@@ -8803,90 +9447,159 @@ do
 
 		local hunterPos = getLiveNPCPos("Dragon Hunter", DRAGON_HUNTER_POS)
 
-		if os.clock() - Others.lastHunterPoll >= 3.5 then
-			Others.lastHunterPoll = os.clock()
-			pcall(function()
-				local res = hunterRF:InvokeServer({Context = "Check"})
-				local txt = (type(res) == "table" and tostring(res.Text or res.Description or "")) or tostring(res or "")
-				Others.hunterText = txt
-				local low = txt:lower()
-				if txt == "" or low:find("head back") or low:find("complete more") or low:find("would you like") or low:find("none") then
-					Others.hunterNeedRequest = true
-				elseif low:find("locked") or low:find("prove you're worthy") then
-					Others.hunterNeedRequest = false
-				else
-					Others.hunterNeedRequest = false
-				end
-			end)
+		-- 2) Zero-yield HUD watch to detect instant quest completion (3/3, 10/10, Head back)
+		local hudText, _, _, hudComplete = readDragonHunterHUD()
+		local hudTask = parseDragonTask(hudText)
+		if hudTask and Others.hunterTask == nil then
+			Others.hunterTask = hudTask
+			Others.hunterNeedRequest = false
+			Others.hunterHadActiveQuest = true
+		end
+		if hudComplete then
+			Others.hunterNeedRequest = true
+			Others.hunterTask = nil
+			Others.hunterLockedMob = nil
+			Others.activeTree = nil
+			Others.lastHunterPoll = 0
 		end
 
-		local lowTxt = Others.hunterText:lower()
-		if lowTxt:find("locked") or lowTxt:find("prove you're worthy") then
+		-- 3) Authoritative quest sync (blocking ONLY on initial unknown state; non-blocking async during farming)
+		if not Others.hunterNeedRequest and Others.hunterTask == nil and not Others.hunterLocked then
+			syncDragonHunterQuest(hunterRF, true)
+		elseif not Others.hunterNeedRequest and (os.clock() - (Others.lastHunterPoll or 0) >= 4.5) then
+			syncDragonHunterQuest(hunterRF, false)
+		end
+
+		if Others.hunterLocked then
+			Others.hunterLockedMob = nil
+			Others.activeTree = nil
 			setStatus("⚠️ Dragon Hunter bloqueado: Completa primero White & Yellow Belt con Dojo Trainer")
 			return
 		end
 
+		-- 4) Approach Dragon Hunter NPC to request or turn-in & accept next hunt
 		if Others.hunterNeedRequest then
+			Others.hunterLockedMob = nil
+			Others.activeTree = nil
 			setStatus("🐉 Dragon Hunter: Pidiendo nueva misión de caza en el Dojo...")
-			local reached = moveToCFrame(CFrame.new(hunterPos + Vector3.new(0, 3, 3.5)))
+			local approachPos = hunterPos + Vector3.new(0, 3, 3.5)
+			local reached = moveToCFrame(CFrame.new(approachPos), hunterPos)
 			if reached or (hrp.Position - hunterPos).Magnitude <= 22 then
-				pcall(function()
-					hunterRF:InvokeServer({Context = "RequestQuest"})
-					local res = hunterRF:InvokeServer({Context = "Check"})
-					Others.hunterText = (type(res) == "table" and tostring(res.Text or res.Description or "")) or tostring(res or "")
-					Others.hunterNeedRequest = false
-				end)
+				hrp.AssemblyLinearVelocity = Vector3.zero
+				if os.clock() - (Others.hunterRequestAt or 0) >= 1.1 then
+					Others.hunterRequestAt = os.clock()
+					local okReq, reqRes = pcall(function()
+						return hunterRF:InvokeServer({Context = "RequestQuest"})
+					end)
+					task.wait(0.12)
+					local okChk, chkRes = pcall(function()
+						return hunterRF:InvokeServer({Context = "Check"})
+					end)
+					Others.lastHunterPoll = os.clock()
+					Others.hunterQuestTakenAt = os.clock()
+					applyDragonHunterResponse(okReq and reqRes or nil, okChk and chkRes or nil)
+					if not Others.hunterLocked and Others.hunterTask == nil and okReq and reqRes ~= nil then
+						local directTask = parseDragonTask(table.concat((function()
+							local s = {}
+							collectDragonStrings(reqRes, s, 0)
+							return s
+						end)(), " "))
+						if directTask then
+							Others.hunterTask = directTask
+							Others.hunterNeedRequest = false
+						end
+					end
+				end
 			end
 			return
 		end
 
-		-- Task A: Defeat 3 Venomous Assailants
-		if lowTxt:find("venomous") or lowTxt:find("assailant") then
-			local mSet = {["Venomous Assailant"] = true}
-			local mob = findAliveEnemyFromSet(mSet)
-			if mob then
-				engageEnemy(mob, mSet, "🐉 Dragon Hunter")
-			else
-				local sp = collectSpawnsForSet(mSet)
-				if #sp == 0 then sp = {CFrame.new(4910.0, 610.0, 420.0)} end
-				setStatus("🐉 Dragon Hunter: Buscando Venomous Assailant en Hydra...")
-				patrolAroundSpawns("DH_Venomous", sp)
-			end
+		-- 5A) Task A & 5B) Defeat 3 Venomous Assailants or 3 Hydra Enforcers
+		if Others.hunterTask == "Venomous" then
+			engageDragonHunterTarget("Venomous Assailant", CFrame.new(4910.0, 610.0, 420.0), "DH_Venomous", "🐉 Dragon Hunter: Buscando Venomous Assailant en Hydra...")
+			return
+		elseif Others.hunterTask == "Enforcer" then
+			engageDragonHunterTarget("Hydra Enforcer", CFrame.new(4625.0, 1002.0, 385.0), "DH_Enforcer", "🐉 Dragon Hunter: Buscando Hydra Enforcer en Hydra...")
 			return
 
-		-- Task B: Defeat 3 Hydra Enforcers
-		elseif lowTxt:find("enforcer") or lowTxt:find("hydra enforcer") then
-			local mSet = {["Hydra Enforcer"] = true}
-			local mob = findAliveEnemyFromSet(mSet)
-			if mob then
-				engageEnemy(mob, mSet, "🐉 Dragon Hunter")
-			else
-				local sp = collectSpawnsForSet(mSet)
-				if #sp == 0 then sp = {CFrame.new(4625.0, 1002.0, 385.0)} end
-				setStatus("🐉 Dragon Hunter: Buscando Hydra Enforcer en Hydra...")
-				patrolAroundSpawns("DH_Enforcer", sp)
-			end
-			return
+		-- 5C) Task C: Destroy 10 Specific Trees on Hydra Island
+		elseif Others.hunterTask == "Trees" then
+			Others.hunterLockedMob = nil
 
-		-- Task C: Destroy 10 Trees on Hydra Island
-		else
-			if os.clock() - Others.lastTreeSwitch > 3.2 then
-				Others.lastTreeSwitch = os.clock()
-				Others.treeIdx = (Others.treeIdx % #HYDRA_TREE_POINTS) + 1
+			-- Check if locked activeTree was broken or timed out
+			if Others.activeTree then
+				local attackElapsed = (Others.activeTreeAttackAt or 0) > 0 and (os.clock() - Others.activeTreeAttackAt) or 0
+				local travelElapsed = os.clock() - (Others.activeTreeSince or os.clock())
+				if isHydraTreeDestroyed(Others.activeTree) then
+					Others.treeBrokenCount = (Others.treeBrokenCount or 0) + 1
+					Others.activeTree = nil
+					Others.activeTreeSince = 0
+					Others.activeTreeAttackAt = 0
+					Others.lastHunterPoll = 0
+				elseif attackElapsed >= 2.6 or travelElapsed >= 12.0 then
+					-- Tree did not break after sustained hits (or unreachable); skip & blacklist so we never stall
+					Others.treeCooldown[Others.activeTree] = os.clock() + 60
+					Others.activeTree = nil
+					Others.activeTreeSince = 0
+					Others.activeTreeAttackAt = 0
+				end
 			end
-			local tPos = HYDRA_TREE_POINTS[Others.treeIdx]
-			setStatus(string.format("🐉 Dragon Hunter: Destruyendo árboles en Hydra (%d/%d)...", Others.treeIdx, #HYDRA_TREE_POINTS))
-			local reached = moveToCFrame(CFrame.new(tPos))
-			if reached or (hrp.Position - tPos).Magnitude <= 20 then
-				performNormalAttack(S.masteryPriority and S.masteryCategory or "Blox Fruit", nil)
-				triggerSelectedMasterySkills(nil)
-				pcall(function()
-					local bt = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("BreakTree")
-					if bt and bt:IsA("RemoteEvent") then
-						bt:FireServer(tPos)
+
+			local targetModel, targetPart, targetPos, isMarked = nil, nil, nil, false
+			if Others.activeTree and Others.activeTree.Parent then
+				local _, p, pos, marked = scoreHydraTreeCandidate(Others.activeTree, hrp.Position, 0)
+				if p and pos then
+					targetModel, targetPart, targetPos, isMarked = Others.activeTree, p, pos, marked
+				else
+					Others.activeTree = nil
+					Others.activeTreeAttackAt = 0
+				end
+			end
+
+			if not targetModel then
+				targetModel, targetPart, targetPos, isMarked = findSpecificHydraTree(hrp.Position)
+				if targetModel then
+					Others.activeTree = targetModel
+					Others.activeTreeSince = os.clock()
+					Others.activeTreeAttackAt = 0
+				end
+			end
+
+			if targetModel and targetPos then
+				local tagLabel = isMarked and "Árbol marcado" or "Árbol de Hydra"
+				setStatus(string.format("🐉 Dragon Hunter: Destruyendo %s (%s)...", tagLabel, targetModel.Name))
+				local flatDir = Vector3.new(hrp.Position.X - targetPos.X, 0, hrp.Position.Z - targetPos.Z)
+				if flatDir.Magnitude < 0.1 then
+					flatDir = Vector3.new(0, 0, 1)
+				else
+					flatDir = flatDir.Unit
+				end
+				local standPos = targetPos + flatDir * 6.5 + Vector3.new(0, 2.0, 0)
+				local reached = moveToCFrame(CFrame.new(standPos), targetPos)
+				if reached or (hrp.Position - targetPos).Magnitude <= 16 then
+					if (Others.activeTreeAttackAt or 0) == 0 then
+						Others.activeTreeAttackAt = os.clock()
 					end
-				end)
+					hrp.AssemblyLinearVelocity = Vector3.zero
+					castDragonTreeBreaker(hrp, targetPos)
+				end
+			else
+				-- Patrol curated Hydra Island bamboo & tree plateaus until destructible trees stream in
+				if os.clock() - Others.lastTreeSwitch > 3.5 then
+					Others.lastTreeSwitch = os.clock()
+					Others.treeIdx = (Others.treeIdx % #HYDRA_TREE_POINTS) + 1
+				end
+				local tPos = HYDRA_TREE_POINTS[Others.treeIdx]
+				setStatus(string.format("🐉 Dragon Hunter: Buscando árboles específicos en Hydra (%d/%d)...", Others.treeIdx, #HYDRA_TREE_POINTS))
+				moveToCFrame(CFrame.new(tPos))
 			end
+			return
+		end
+
+		-- 6) Safe fallback when quest exists on server but task name wasn't read yet
+		setStatus("🐉 Dragon Hunter: Sincronizando objetivo de misión...")
+		if os.clock() - (Others.lastHunterPoll or 0) >= 1.5 then
+			syncDragonHunterQuest(hunterRF, false)
 		end
 	end
 
