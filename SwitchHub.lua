@@ -217,14 +217,14 @@ local S = {
 	autoSeaEvent = false,
 	selectedSeaZone = "Zona 6 (Danger 6 - ???)",
 	selectedBoat = "Grand Brigade",
-	seaBoatSpeed = 220,
+	seaBoatSpeed = 165,
 	seaSafeBoatFly = true,
 	seaReturnAt10km = true,
 	seaResetOnBoatLost = true,
 	seaDodgeAttacks = true,
 	seaClearFog = true,
-	seaUseFruitM1 = false,
-	seaUseM1 = false,
+	seaUseFruitM1 = true,
+	seaUseM1 = true,
 	selectedSeaEvents = {
 		["Terrorshark"] = true,
 		["Sea Beast"] = true,
@@ -966,14 +966,14 @@ local function getToolByWeaponType(wType)
 end
 
 local lastEquipAttempt = 0
-local function equipWeaponType(wType)
+local function equipWeaponType(wType, bypassThrottle)
 	local char = LocalPlayer.Character
 	local hum = char and char:FindFirstChildOfClass("Humanoid")
 	if not hum or hum.Health <= 0 then return nil end
 
 	local tool = getToolByWeaponType(wType or S.weaponType)
 	if tool then
-		if tool.Parent ~= char and (os.clock() - lastEquipAttempt > 0.25) then
+		if tool.Parent ~= char and not hum.SeatPart and (bypassThrottle or (os.clock() - lastEquipAttempt > 0.20)) then
 			lastEquipAttempt = os.clock()
 			pcall(function()
 				hum:EquipTool(tool)
@@ -1381,9 +1381,9 @@ do
 
 		local holdTime = getHoldTimeForCategory(chosenCat)
 		local baseCd = SKILL_BASE_COOLDOWN[keyName] or 4.5
-		skillReadyClock[chosenCat .. "_" .. keyName] = now + holdTime + baseCd
+		local minGap = (mode == "sea") and 0.22 or 0.30
 		lastGlobalSkillClock = now
-		nextAllowedSkillClock = now + holdTime + 0.30
+		nextAllowedSkillClock = now + holdTime + minGap
 		isCastingGlobalSkill = true
 		S.isCastingSkillAim = true
 
@@ -1400,11 +1400,11 @@ do
 				if not char then return end
 				local hum = char:FindFirstChildOfClass("Humanoid")
 				local hrp = char:FindFirstChild("HumanoidRootPart")
-				if not hum or hum.Health <= 0 or not hrp then return end
+				if not hum or hum.Health <= 0 or not hrp or hum.SeatPart then return end
 				humRef = hum
 
 				-- Acquire target enemy if none was passed in (e.g. standalone Auto Skills Global)
-				local activeEnemy = targetEnemy or S.lastAimEnemy or findNearestManualTarget(160)
+				local activeEnemy = targetEnemy or S.lastAimEnemy or findNearestManualTarget(180)
 
 				local eqTool = getToolByWeaponType(chosenCat)
 				if not eqTool then return end
@@ -1418,7 +1418,7 @@ do
 						S.lastAimPos = aimPart.Position
 					else
 						if not activeEnemy or not activeEnemy.Parent then
-							activeEnemy = findNearestManualTarget(160)
+							activeEnemy = findNearestManualTarget(180)
 						end
 						if activeEnemy then
 							updateMasteryAimTarget(activeEnemy)
@@ -1427,6 +1427,10 @@ do
 					end
 
 					if (S.skillAimlock or S.masteryAimlock) and aimPart and aimPart.Parent and hrp and hrp.Parent then
+						if S.activeTween then
+							pcall(function() S.activeTween:Cancel() end)
+							S.activeTween = nil
+						end
 						local aimPos = aimPart.Position
 						S.lastAimPos = aimPos
 						local delta = (aimPos - hrp.Position)
@@ -1459,7 +1463,7 @@ do
 					lastEquipAttempt = os.clock()
 					pcall(function() hum:EquipTool(eqTool) end)
 					local eqWait = os.clock()
-					while eqTool.Parent ~= char and (os.clock() - eqWait < 0.22) do
+					while eqTool.Parent ~= char and (os.clock() - eqWait < 0.28) do
 						RunService.Heartbeat:Wait()
 					end
 					if eqTool.Parent ~= char then return end
@@ -1469,6 +1473,9 @@ do
 						RunService.Heartbeat:Wait()
 					end
 				end
+
+				-- Mark cooldown ONLY after confirming the weapon actually equipped cleanly
+				skillReadyClock[chosenCat .. "_" .. keyName] = os.clock() + holdTime + baseCd
 
 				if GlobalModule then
 					GlobalModule.tapCooldown = 0
@@ -1547,12 +1554,14 @@ do
 
 	performNormalAttack = function(weaponTypeOverride, primaryEnemy, skipGeneralSkills)
 		if isCastingGlobalSkill then return end
-		local now = os.clock()
-		if now - lastNormalSwing < 0.065 then return end
-		lastNormalSwing = now
-
 		local char = LocalPlayer.Character
 		if not char then return end
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if not hum or hum.Health <= 0 or hum.SeatPart then return end
+
+		local now = os.clock()
+		if now - lastNormalSwing < 0.065 then return end
+
 		if not CombatController and S.ensureCombatModulesReady then
 			S.ensureCombatModulesReady(false)
 		end
@@ -1567,8 +1576,9 @@ do
 			end
 		end
 
-		local tool = S.autoEquip and equipWeaponType(targetWType) or char:FindFirstChildOfClass("Tool")
+		local tool = (S.autoEquip or weaponTypeOverride ~= nil) and equipWeaponType(targetWType, weaponTypeOverride ~= nil) or char:FindFirstChildOfClass("Tool")
 		if not tool or tool.Parent ~= char then return end
+		lastNormalSwing = now
 
 		-- Lock Gun / Fruit / Skill aim dead-center onto the target NPC / Sea Event
 		if primaryEnemy then
@@ -5943,7 +5953,7 @@ do
 	CardSeaNav:AddSlider(
 		"Velocidad del Bote",
 		"Velocidad de navegación automática hacia la zona elegida",
-		100, 350, S.seaBoatSpeed,
+		80, 280, S.seaBoatSpeed,
 		function(v)
 			S.seaBoatSpeed = v
 		end
@@ -6868,7 +6878,7 @@ do
 		local char = LocalPlayer.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if char then
-			if S.levelFarm or S.bossFarm or S.allBossFarm or S.autoFirstSeaComplete or S.autoSecondSeaComplete or S.stackTaskRunning or S.othersTaskRunning or S.raidTaskRunning or S.seaTaskRunning or S.styleShopBusy or S.islandTweenBusy or S.noClip then
+			if S.levelFarm or S.bossFarm or S.allBossFarm or S.autoFirstSeaComplete or S.autoSecondSeaComplete or S.stackTaskRunning or S.othersTaskRunning or S.raidTaskRunning or S.seaTaskRunning or S.autoSeaEvent or S.autoMultiFindLevi or S.leviOwnerAutoBuyBoat or S.styleShopBusy or S.islandTweenBusy or S.noClip then
 				for _, part in ipairs(getCachedCharacterParts(char)) do
 					if part.Parent and part.CanCollide then
 						part.CanCollide = false
@@ -11410,14 +11420,34 @@ do
 			if not bv then
 				bv = Instance.new("BodyVelocity")
 				bv.Name = "SwitchHubBoatBV"
-				bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+				bv.MaxForce = Vector3.new(1e7, 1e7, 1e7)
 				bv.Parent = seat
 			end
 			bv.Velocity = Vector3.zero
-			if S.seaSafeBoatFly and seat.Position.Y < 30 then
-				boat:PivotTo(CFrame.new(seat.Position.X, 32, seat.Position.Z))
+			seat.AssemblyAngularVelocity = Vector3.zero
+			if S.seaSafeBoatFly and seat.Position.Y < 45 then
+				boat:PivotTo(CFrame.new(seat.Position.X, 58, seat.Position.Z))
 			end
 		end)
+	end
+
+	function Others.dismountBoatForCombat(hrp, hum, myBoat, mySeat)
+		if myBoat and mySeat then
+			Others.parkBoatSafely(myBoat, mySeat)
+		end
+		if hum and hum.SeatPart then
+			hum.Sit = false
+			pcall(function()
+				local sw = mySeat and mySeat:FindFirstChild("SeatWeld")
+				if sw then sw:Destroy() end
+				local hw = hrp and hrp:FindFirstChild("SeatWeld")
+				if hw then hw:Destroy() end
+			end)
+			if hrp then
+				hrp.CFrame = hrp.CFrame + Vector3.new(0, 6, 0)
+			end
+			task.wait(0.06)
+		end
 	end
 
 	function Others.checkBoatLostAndReset(myBoat, mySeat, hrp, hum)
@@ -11555,7 +11585,7 @@ do
 		if S.seaSafeBoatFly then
 			pcall(function()
 				for _, p in ipairs(myBoat:GetDescendants()) do
-					if p:IsA("BasePart") and p ~= mySeat and p.CanCollide then
+					if p:IsA("BasePart") and p.CanCollide then
 						p.CanCollide = false
 					end
 				end
@@ -11568,27 +11598,39 @@ do
 			Others.hadActiveSeaBoat = true
 		end
 
+		-- Climb cleanly above harbor rocks/islands before horizontal cruise when Safe Boat Fly is active
+		local steerPos = wp
+		local flatDelta = Vector3.new(wp.X - mySeat.Position.X, 0, wp.Z - mySeat.Position.Z)
+		if S.seaSafeBoatFly and mySeat.Position.Y < (wp.Y - 12) then
+			local flatDir = (flatDelta.Magnitude > 1) and flatDelta.Unit or Vector3.new(-1, 0, 0)
+			steerPos = Vector3.new(mySeat.Position.X + flatDir.X * 14, wp.Y + 4, mySeat.Position.Z + flatDir.Z * 14)
+		end
+
 		local delta = wp - mySeat.Position
-		local speed = math.clamp(tonumber(S.seaBoatSpeed) or 220, 100, 350)
+		local steerDelta = steerPos - mySeat.Position
+		local speed = math.clamp(tonumber(S.seaBoatSpeed) or 165, 80, 280)
 		pcall(function()
 			local bv = mySeat:FindFirstChild("SwitchHubBoatBV")
 			if not bv then
 				bv = Instance.new("BodyVelocity")
 				bv.Name = "SwitchHubBoatBV"
-				bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+				bv.MaxForce = Vector3.new(1e7, 1e7, 1e7)
 				bv.Parent = mySeat
 			end
 			local bg = mySeat:FindFirstChild("SwitchHubBoatBG")
 			if not bg then
 				bg = Instance.new("BodyGyro")
 				bg.Name = "SwitchHubBoatBG"
-				bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
-				bg.P = 9000
-				bg.D = 500
+				bg.MaxTorque = Vector3.new(1e7, 1e7, 1e7)
+				bg.P = 4000
+				bg.D = 450
 				bg.Parent = mySeat
 			end
-			if delta.Magnitude > 5 then
-				bv.Velocity = delta.Unit * speed
+			mySeat.AssemblyAngularVelocity = Vector3.zero
+			if delta.Magnitude > 8 then
+				local moveDir = (steerDelta.Magnitude > 0.5) and steerDelta.Unit or delta.Unit
+				-- Gently moderate vertical/climb factor while keeping steady cruise speed
+				bv.Velocity = moveDir * speed
 				local flatTarget = Vector3.new(wp.X, mySeat.Position.Y, wp.Z)
 				if (flatTarget - mySeat.Position).Magnitude > 2 then
 					bg.CFrame = CFrame.lookAt(mySeat.Position, flatTarget)
@@ -11949,7 +11991,7 @@ do
 				return true
 			end
 
-			local sailY = S.seaSafeBoatFly and 28 or 10
+			local sailY = S.seaSafeBoatFly and 62 or 14
 			local kitWaypoints = {
 				Vector3.new(-25000, sailY, 500), -- Zone 5 edge
 				Vector3.new(-26800, sailY, 500), -- Zone 6 (???) spawn trigger (< 10 km from Tiki!)
@@ -12948,13 +12990,7 @@ do
 
 			if chosenModel and chosenPart then
 				local myBoat, mySeat = Others.findMyBoat()
-				if myBoat and mySeat then
-					Others.parkBoatSafely(myBoat, mySeat)
-				end
-				if hum.SeatPart then
-					hum.Sit = false
-					task.wait(0.05)
-				end
+				Others.dismountBoatForCombat(hrp, hum, myBoat, mySeat)
 
 				pcall(function()
 					if sethiddenproperty then
@@ -13057,24 +13093,25 @@ do
 				local targetInfo = Others.findActiveSeaEventTarget(hrp.Position)
 				if targetInfo and targetInfo.part and targetInfo.model and (targetInfo.part.Position - hrp.Position).Magnitude <= 950 then
 					local myBoat, mySeat = Others.findMyBoat()
-					if myBoat and mySeat then
-						Others.parkBoatSafely(myBoat, mySeat)
+					Others.dismountBoatForCombat(hrp, hum, myBoat, mySeat)
+					local hoverY = targetInfo.hoverY or 20
+					if S.seaDodgeAttacks and (hum.Health / math.max(1, hum.MaxHealth)) < 0.35 then
+						hoverY = math.max(hoverY + 26, 52)
 					end
-					if hum.SeatPart then
-						hum.Sit = false
-						task.wait(0.05)
+					local safeY = math.max(targetInfo.part.Position.Y + hoverY, 16)
+					local combatPos = Vector3.new(targetInfo.part.Position.X, safeY, targetInfo.part.Position.Z + 2.5)
+					local dTarget = (hrp.Position - targetInfo.part.Position).Magnitude
+					setStatus(string.format("🤝 Equipo limpiando %s [%dm]...", targetInfo.label, math.floor(dTarget)))
+					if not S.isCastingSkillAim or dTarget > 95 then
+						moveToCFrame(CFrame.new(combatPos), targetInfo.part.Position)
 					end
-					local hoverY = targetInfo.hoverY or 26
-					if S.seaDodgeAttacks and (hum.Health / math.max(1, hum.MaxHealth)) < 0.38 then
-						hoverY = math.max(hoverY + 35, 72)
-					end
-					local combatPos = targetInfo.part.Position + Vector3.new(0, hoverY, 2.5)
-					setStatus(string.format("🤝 Equipo limpiando %s [%dm]...", targetInfo.label, math.floor((hrp.Position - targetInfo.part.Position).Magnitude)))
-					moveToCFrame(CFrame.new(combatPos), targetInfo.part.Position)
 					if targetInfo.bringable then
 						bringNearbyMobs(nil, targetInfo.part.CFrame)
 					end
-					Others.fireSeaEventWeaponsAndSkills(targetInfo.model, targetInfo.part, targetInfo.kind)
+					local atkRange = (targetInfo.kind == "Sea Beast") and 230 or 185
+					if dTarget <= atkRange then
+						Others.fireSeaEventWeaponsAndSkills(targetInfo.model, targetInfo.part, targetInfo.kind)
+					end
 					return true
 				end
 			end
@@ -13113,7 +13150,7 @@ do
 					Others.returningFrom10km = false
 				end
 
-				local sailY = S.seaSafeBoatFly and 28 or 12
+				local sailY = S.seaSafeBoatFly and 62 or 14
 				if Others.returningFrom10km then
 					local distNow = Others.driveBoatSeatTo(myBoat, mySeat, Vector3.new(-21650, sailY, 500), hrp, 3)
 					setStatus(string.format("↩️ Multi-Find (10 km): Regresando a 5.0 km [%.2f km]...", distNow / 1000))
@@ -13123,14 +13160,17 @@ do
 				local center = SEA3_ZONE_CENTERS[6]
 				local offsets = {
 					Vector3.new(0, 0, 0),
-					Vector3.new(-450, 0, 480),
-					Vector3.new(-900, 0, 0),
-					Vector3.new(-450, 0, -480),
+					Vector3.new(250, 0, 450),
+					Vector3.new(-250, 0, 0),
+					Vector3.new(250, 0, -450),
 				}
 				if Others.seaPatrolIdx > #offsets then
 					Others.seaPatrolIdx = 1
 				end
 				local wp = Vector3.new(center.X, sailY, center.Z) + offsets[Others.seaPatrolIdx]
+				if S.seaReturnAt10km then
+					wp = Vector3.new(math.max(wp.X, SEA3_DOCK_ORIGIN.X - 9650), wp.Y, wp.Z)
+				end
 				local distNow, remDist = Others.driveBoatSeatTo(myBoat, mySeat, wp, hrp, 3)
 				if remDist <= 55 and (os.clock() - Others.lastSeaPatrolSwitch > 1.5) then
 					Others.lastSeaPatrolSwitch = os.clock()
@@ -13190,9 +13230,13 @@ do
 		local enemies = Workspace:FindFirstChild("Enemies")
 
 		local function isEntityAlive(m)
-			local hVal = m:FindFirstChild("Health")
+			local hVal = m:FindFirstChild("Health") or m:FindFirstChild("Health", true)
 			if hVal and hVal:IsA("ValueBase") and tonumber(hVal.Value) ~= nil then
 				return tonumber(hVal.Value) > 0, tonumber(hVal.Value), tonumber(hVal:GetAttribute("MaxValue")) or tonumber(hVal.Value)
+			end
+			local hAttr = m:GetAttribute("Health")
+			if tonumber(hAttr) ~= nil then
+				return tonumber(hAttr) > 0, tonumber(hAttr), tonumber(m:GetAttribute("MaxHealth")) or tonumber(hAttr)
 			end
 			local hum = m:FindFirstChildOfClass("Humanoid")
 			if hum then
@@ -13204,11 +13248,12 @@ do
 		-- 1) Terrorshark (Highest danger priority)
 		if sel["Terrorshark"] and enemies then
 			for _, en in ipairs(enemies:GetChildren()) do
-				if en.Name:find("Terrorshark") then
+				local lowName = en.Name:lower()
+				if lowName:find("terrorshark") or lowName:find("terror shark") then
 					local alive = isEntityAlive(en)
-					local part = en:FindFirstChild("HumanoidRootPart") or en:FindFirstChildWhichIsA("BasePart")
+					local part = en:FindFirstChild("HumanoidRootPart") or en:FindFirstChild("UpperTorso") or en:FindFirstChildWhichIsA("BasePart")
 					if alive and part and (part.Position - refPos).Magnitude <= 2800 then
-						return {kind = "Terrorshark", label = "🦈 Terrorshark", model = en, part = part, hoverY = 34}
+						return {kind = "Terrorshark", label = "🦈 Terrorshark", model = en, part = part, hoverY = 18}
 					end
 				end
 			end
@@ -13220,10 +13265,11 @@ do
 			if sbFolder then
 				local bestSB, bestPart, bestDist = nil, nil, 3200
 				for _, sb in ipairs(sbFolder:GetChildren()) do
-					if sb:IsA("Model") and not sb.Name:find("Leviathan") then
+					if sb:IsA("Model") and not sb.Name:lower():find("leviathan") then
 						local alive = isEntityAlive(sb)
 						local part = sb:FindFirstChild("HumanoidRootPart")
 							or sb:FindFirstChild("RootPart")
+							or sb:FindFirstChild("Head")
 							or sb.PrimaryPart
 							or sb:FindFirstChildWhichIsA("BasePart")
 						if alive and part and part.Position.Y > -120 then
@@ -13237,7 +13283,7 @@ do
 					end
 				end
 				if bestSB and bestPart then
-					local sbHover = ((S.seaWeapons and S.seaWeapons["Blox Fruit"] and S.seaUseFruitM1) or S.seaUseM1) and 34 or 52
+					local sbHover = ((S.seaWeapons and S.seaWeapons["Blox Fruit"] and S.seaUseFruitM1) or S.seaUseM1) and 24 or 34
 					return {kind = "Sea Beast", label = "🐉 Sea Beast", model = bestSB, part = bestPart, hoverY = sbHover}
 				end
 			end
@@ -13249,9 +13295,9 @@ do
 				if folder then
 					for _, ship in ipairs(folder:GetChildren()) do
 						if ship:IsA("Model") then
-							local n = ship.Name
-							local isPirateShip = sel["Pirate Ship Raid"] and (n == "PirateBrigade" or n == "PirateGrandBrigade")
-							local isGhostShip = sel["Ghost Ship Raid"] and (n == "FishBoat" or n:find("GhostShip"))
+							local nLow = ship.Name:lower()
+							local isPirateShip = sel["Pirate Ship Raid"] and (nLow == "piratebrigade" or nLow == "pirategrandbrigade" or nLow:find("piratebrigade") or nLow:find("pirate_brigade"))
+							local isGhostShip = sel["Ghost Ship Raid"] and (nLow == "fishboat" or nLow:find("ghostship") or nLow:find("ghost_ship"))
 							if isPirateShip or isGhostShip then
 								local alive = isEntityAlive(ship)
 								local part = ship:FindFirstChild("Engine")
@@ -13266,7 +13312,7 @@ do
 										label = isGhostShip and "👻 Ghost Ship Raid" or "🏴‍☠️ Pirate Ship Raid",
 										model = ship,
 										part = part,
-										hoverY = 26,
+										hoverY = 20,
 									}
 								end
 							end
@@ -13278,7 +13324,7 @@ do
 
 		-- 4) Ocean Mobs (Piranha -> Shark -> Fish Crew Member -> Haunted Shipwreck)
 		if enemies then
-			local bestMob, bestPart, bestKind, bestHover, bestScore = nil, nil, nil, 22, math.huge
+			local bestMob, bestPart, bestKind, bestHover, bestScore = nil, nil, nil, 16, math.huge
 			for _, en in ipairs(enemies:GetChildren()) do
 				local alive = isEntityAlive(en)
 				local part = en:FindFirstChild("HumanoidRootPart") or en:FindFirstChildWhichIsA("BasePart")
@@ -13286,22 +13332,23 @@ do
 					local d = (part.Position - refPos).Magnitude
 					if d <= 2000 then
 						local clean = Others.cleanEntityName(en.Name)
+						local cleanLow = clean:lower()
 						local matchedKind = nil
-						local hover = 22
+						local hover = 16
 						local prioBonus = 0
-						if sel["Piranha"] and clean:find("Piranha") then
+						if sel["Piranha"] and cleanLow:find("piranha") then
 							matchedKind = "Piranha"
-							hover = 26
+							hover = 16
 							prioBonus = -500 -- Kill Piranhas first!
-						elseif sel["Shark"] and clean == "Shark" then
+						elseif sel["Shark"] and cleanLow == "shark" then
 							matchedKind = "Shark"
-							hover = 22
-						elseif sel["Fish Crew Member"] and (clean:find("Fish Crew") or clean:find("Fisherman")) then
+							hover = 16
+						elseif sel["Fish Crew Member"] and (cleanLow:find("fish crew") or cleanLow:find("fisherman")) then
 							matchedKind = "Fish Crew Member"
-							hover = 22
-						elseif sel["Haunted Shipwreck"] and (clean:find("Haunted") or clean:find("Shipwreck")) then
+							hover = 16
+						elseif sel["Haunted Shipwreck"] and (cleanLow:find("haunted") or cleanLow:find("shipwreck") or cleanLow:find("cursed sailor")) then
 							matchedKind = "Haunted Shipwreck"
-							hover = 22
+							hover = 16
 						end
 						if matchedKind and (d + prioBonus) < bestScore then
 							bestScore = d + prioBonus
@@ -13355,7 +13402,7 @@ do
 			end
 		end
 		if #activeWeapons == 0 then
-			table.insert(activeWeapons, S.weaponType or "Blox Fruit")
+			table.insert(activeWeapons, S.weaponType or "Melee")
 		end
 
 		if #activeWeapons > 1 and (os.clock() - Others.lastSeaWeaponSwitch >= 2.0) then
@@ -13367,8 +13414,39 @@ do
 		end
 
 		local curWeapon = activeWeapons[Others.seaWeaponIdx]
+
+		-- Pick the most effective weapon for M1 so we never stall for 2s on a Fruit without M1 when Melee/Sword M1 works!
+		local isStructureTarget = (kind == "Sea Beast" or kind == "Pirate Ship Raid" or kind == "Ghost Ship Raid" or kind == "Leviathan")
+		local m1Weapon = nil
+		local fruitTool = S.seaWeapons and S.seaWeapons["Blox Fruit"] and getToolByWeaponType("Blox Fruit")
+		local hasFruitM1 = fruitTool and (fruitTool:FindFirstChild("LeftClickRemote") ~= nil)
+
+		if not isStructureTarget and S.seaUseM1 then
+			for _, w in ipairs({"Melee", "Sword", "Gun"}) do
+				if S.seaWeapons and S.seaWeapons[w] and getToolByWeaponType(w) then
+					m1Weapon = w
+					break
+				end
+			end
+		end
+		if not m1Weapon and S.seaUseFruitM1 and hasFruitM1 then
+			m1Weapon = "Blox Fruit"
+		end
+		if not m1Weapon and S.seaUseM1 then
+			for _, w in ipairs({"Melee", "Sword", "Gun"}) do
+				if S.seaWeapons and S.seaWeapons[w] and getToolByWeaponType(w) then
+					m1Weapon = w
+					break
+				end
+			end
+		end
+		if not m1Weapon and S.seaUseFruitM1 and fruitTool then
+			m1Weapon = "Blox Fruit"
+		end
+
 		ensureBusoHaki()
-		local tool = equipWeaponType(curWeapon)
+		local m1OrSkillWeapon = m1Weapon or curWeapon
+		local tool = equipWeaponType(m1OrSkillWeapon, true)
 		if tool then
 			local mp = tool:FindFirstChild("MousePos")
 			if mp and mp:IsA("Vector3Value") then
@@ -13376,16 +13454,14 @@ do
 			end
 		end
 
-		-- Fire Blox Fruit M1 Clicks (LeftClickRemote + Click + Hitbox) or Weapon M1s
-		if curWeapon == "Blox Fruit" then
-			if S.seaUseFruitM1 then
-				performNormalAttack("Blox Fruit", targetModel, true)
-			end
-		elseif S.seaUseM1 then
-			performNormalAttack(curWeapon, targetModel, true)
+		-- Fire M1 clicks cleanly (Fruit M1 or Melee/Sword/Gun M1)
+		if m1Weapon == "Blox Fruit" and S.seaUseFruitM1 then
+			performNormalAttack("Blox Fruit", targetModel, true)
+		elseif m1Weapon and S.seaUseM1 then
+			performNormalAttack(m1Weapon, targetModel, true)
 		end
 
-		-- Centralized Global Skills controller (Advanced Setting Skills tab)
+		-- Centralized Global Skills controller (rotates across enabled Sea Weapons' Z/X/C/V skills!)
 		S.castGlobalSkills(curWeapon, targetModel, targetPart, "sea")
 	end
 
@@ -13397,17 +13473,29 @@ do
 		end
 
 		local myBoat, mySeat = Others.findMyBoat()
+		local sailY = S.seaSafeBoatFly and 62 or 14
 
 		-- 1) Check Active Hostile Sea Events (Terrorshark, Sea Beast, Pirate/Ghost Ship, Shark, Piranha, Crew)
 		local targetInfo = Others.findActiveSeaEventTarget(hrp.Position)
 		if targetInfo and targetInfo.part and targetInfo.model then
-			if myBoat and mySeat then
-				Others.parkBoatSafely(myBoat, mySeat)
+			local dTarget = (hrp.Position - targetInfo.part.Position).Magnitude
+
+			-- If we're driving/near our boat and the event is far away (> 380 studs), fly the boat over first!
+			if myBoat and mySeat and (hum.SeatPart == mySeat or (hrp.Position - mySeat.Position).Magnitude <= 90) and dTarget > 380 then
+				if hum.SeatPart ~= mySeat then
+					clearFarmMover()
+					pcall(function()
+						hrp.CFrame = mySeat.CFrame + Vector3.new(0, 2, 0)
+						mySeat:Sit(hum)
+					end)
+				end
+				local approachPos = Vector3.new(targetInfo.part.Position.X, sailY, targetInfo.part.Position.Z)
+				Others.driveBoatSeatTo(myBoat, mySeat, approachPos, hrp, seaNum)
+				setStatus(string.format("%s: Acercando bote al evento [%dm]...", targetInfo.label, math.floor(dTarget)))
+				return true
 			end
-			if hum.SeatPart then
-				hum.Sit = false
-				task.wait(0.05)
-			end
+
+			Others.dismountBoatForCombat(hrp, hum, myBoat, mySeat)
 
 			pcall(function()
 				if sethiddenproperty then
@@ -13415,25 +13503,31 @@ do
 				end
 			end)
 
-			local hoverY = targetInfo.hoverY or 25
+			local hoverY = targetInfo.hoverY or 18
 			local hpRatio = hum.Health / math.max(1, hum.MaxHealth)
 			if S.seaDodgeAttacks then
-				if hpRatio < 0.38 then
-					hoverY = math.max(hoverY + 35, 72)
-				elseif targetInfo.kind == "Terrorshark" and (math.floor(os.clock() * 1.5) % 4 == 0) then
-					hoverY = hoverY + 18
+				if hpRatio < 0.35 then
+					hoverY = math.max(hoverY + 26, 52)
+				elseif targetInfo.kind == "Terrorshark" and (math.floor(os.clock() * 1.5) % 5 == 0) then
+					hoverY = hoverY + 14
 				end
 			end
 
-			local combatPos = targetInfo.part.Position + Vector3.new(0, hoverY, 2.5)
-			setStatus(string.format("%s: Atacando con Armas / Skills [%dm]...", targetInfo.label, math.floor((hrp.Position - targetInfo.part.Position).Magnitude)))
-			moveToCFrame(CFrame.new(combatPos), targetInfo.part.Position)
+			local safeY = math.max(targetInfo.part.Position.Y + hoverY, 16)
+			local combatPos = Vector3.new(targetInfo.part.Position.X, safeY, targetInfo.part.Position.Z + 2.5)
+			setStatus(string.format("%s: Atacando con Armas / Skills [%dm]...", targetInfo.label, math.floor(dTarget)))
+			if not S.isCastingSkillAim or dTarget > 95 then
+				moveToCFrame(CFrame.new(combatPos), targetInfo.part.Position)
+			end
 
 			if targetInfo.bringable then
 				bringNearbyMobs(nil, targetInfo.part.CFrame)
 			end
 
-			Others.fireSeaEventWeaponsAndSkills(targetInfo.model, targetInfo.part, targetInfo.kind)
+			local atkRange = (targetInfo.kind == "Sea Beast") and 230 or 185
+			if dTarget <= atkRange then
+				Others.fireSeaEventWeaponsAndSkills(targetInfo.model, targetInfo.part, targetInfo.kind)
+			end
 			return true
 		end
 
@@ -13462,7 +13556,6 @@ do
 
 		local zoneNum = math.clamp(tonumber(tostring(S.selectedSeaZone):match("(%d)")) or 6, 1, 6)
 		local zoneTable = (seaNum == 3) and SEA3_ZONE_CENTERS or SEA2_ZONE_CENTERS
-		local sailY = S.seaSafeBoatFly and 28 or 10
 
 		if Others.returningFrom10km then
 			local returnTarget = (seaNum == 3)
@@ -13476,14 +13569,17 @@ do
 		local center = zoneTable[zoneNum] or zoneTable[6]
 		local offsets = {
 			Vector3.new(0, 0, 0),
-			Vector3.new(-450, 0, 480),
-			Vector3.new(-900, 0, 0),
-			Vector3.new(-450, 0, -480),
+			Vector3.new(250, 0, 450),
+			Vector3.new(-250, 0, 0),
+			Vector3.new(250, 0, -450),
 		}
 		if Others.seaPatrolIdx > #offsets then
 			Others.seaPatrolIdx = 1
 		end
 		local wp = Vector3.new(center.X, sailY, center.Z) + offsets[Others.seaPatrolIdx]
+		if seaNum == 3 and S.seaReturnAt10km then
+			wp = Vector3.new(math.max(wp.X, SEA3_DOCK_ORIGIN.X - 9650), wp.Y, wp.Z)
+		end
 		local distToCenter = Vector2.new(center.X - mySeat.Position.X, center.Z - mySeat.Position.Z).Magnitude
 		local distNow, remDist = Others.driveBoatSeatTo(myBoat, mySeat, wp, hrp, seaNum)
 
