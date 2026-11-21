@@ -1713,8 +1713,9 @@ do
 		ensureBusoHaki()
 		local targetWType = weaponTypeOverride or S.weaponType
 
-		-- If Doble Daño is ON, lead with Blox Fruit M1 so Melee M1 hides right behind Fruit M1!
-		if S.doubleDamage and (weaponTypeOverride == nil or weaponTypeOverride == "Blox Fruit" or weaponTypeOverride == S.weaponType) then
+		-- If Doble Daño is ON (and caller didn't pass an explicit override like Sea Event Melee/Mastery),
+		-- lead with Blox Fruit M1 so Melee M1 hides right behind Fruit M1!
+		if S.doubleDamage and (not skipGeneralSkills) and (weaponTypeOverride == nil or weaponTypeOverride == "Blox Fruit" or weaponTypeOverride == S.weaponType) then
 			if getToolByWeaponType("Blox Fruit") and getToolByWeaponType("Melee") then
 				targetWType = "Blox Fruit"
 			end
@@ -1740,14 +1741,14 @@ do
 		end
 
 		local isMeleeOrSwordOrFruit = (targetWType == "Melee" or targetWType == "Sword" or isFruitTool)
-		-- Throttle heavy client swing animations/particles/sounds/camera shake for Melee & Sword
-		-- while RE/RegisterAttack(0) + SendHitsToServer keeps full server hit rate!
-		local visualInterval = (isFruitTool or targetWType == "Gun") and 0.16 or 0.42
+		-- Sync CombatController:Attack with server M1 cadence (~0.18s Melee/Sword, ~0.12s Gun/Fruit)
+		-- so special M1 combos, Guns, and Fruit transformations never drop hits while still avoiding 12x/s spam
+		local visualInterval = (isFruitTool or targetWType == "Gun") and 0.12 or 0.18
 		local triggerVisualSwing = (now - lastVisualSwing) >= visualInterval
 		if triggerVisualSwing then
 			lastVisualSwing = now
 		end
-		local triggerActivateFallback = (isFruitTool and triggerVisualSwing) or (not CombatController)
+		local triggerActivateFallback = ((isFruitTool or targetWType == "Gun") and triggerVisualSwing) or (not CombatController)
 
 		pcall(dispatchAttackSwing, tool, isMeleeOrSwordOrFruit, triggerVisualSwing, triggerActivateFallback)
 
@@ -2217,14 +2218,27 @@ end
 --------------------------------------------------------------------------------
 -- BRING MOBS (STRICTLY MAX 3 MOBS) & TARGET LOCKING
 --------------------------------------------------------------------------------
+local stuckEnemyBlacklist = {}
+local lastLockedEnemyRef = nil
+local lastLockedEnemyHP = nil
+local lastLockedDamageClock = 0
+
+local function getMobRootPart(enemy)
+	return enemy:FindFirstChild("HumanoidRootPart")
+		or enemy:FindFirstChild("UpperTorso")
+		or enemy:FindFirstChild("Torso")
+		or enemy.PrimaryPart
+		or enemy:FindFirstChildWhichIsA("BasePart")
+end
+
 local function applyMobBringState(enemy, centerCFrame, eHum, eHrp, dist)
-	if dist > 2.2 then
+	if dist > 0.6 then
 		eHrp.CFrame = centerCFrame
 	end
 	if eHrp.CanCollide then
 		eHrp.CanCollide = false
 	end
-	if eHrp.Velocity.Magnitude > 1.5 then
+	if eHrp.Velocity.Magnitude > 0.25 then
 		eHrp.Velocity = Vector3.zero
 	end
 	if eHum.WalkSpeed ~= 0 then
@@ -2254,13 +2268,13 @@ local function bringNearbyMobs(targetNamesMap, centerCFrame)
 		if not eName:find("%[Boss%]") then
 			local matches = (not targetNamesMap) or targetNamesMap[eName]
 			if not matches and eName:find("[", 1, true) then
-				local clean = eName:gsub(" %[Raid Boss%]", ""):gsub(" %[Boss%]", ""):gsub(" %[Lv%. %d+%]", "")
+				local clean = eName:gsub("%s*%[.-%]", ""):gsub("^%s+", ""):gsub("%s+$", "")
 				matches = targetNamesMap[clean]
 			end
 			if matches then
 				local eHum = enemy:FindFirstChildOfClass("Humanoid")
-				local eHrp = enemy:FindFirstChild("HumanoidRootPart")
-				if eHum and eHum.Health > 0 and eHrp then
+				local eHrp = getMobRootPart(enemy)
+				if eHum and eHum.Health > 0 and eHrp and eHrp.Position.Y > -200 then
 					local dist = (eHrp.Position - centerPos).Magnitude
 					if dist <= 260 then
 						brought = brought + 1
@@ -2278,41 +2292,85 @@ local function findAliveEnemyFromSet(targetNamesMap, maxRadius)
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	if not enemiesFolder or not hrp then return nil end
 
-	-- Keep current locked enemy until it dies so we never ping-pong between two live mobs
+	local now = os.clock()
+
+	-- Keep current locked enemy until it dies, UNLESS it glitches under the map or takes 0 damage for 8s
 	if S.lockedEnemy and S.lockedEnemy.Parent == enemiesFolder then
-		local clean = S.lockedEnemy.Name:gsub(" %[Raid Boss%]", ""):gsub(" %[Boss%]", ""):gsub(" %[Lv%. %d+%]", "")
-		local matches = (not targetNamesMap) or targetNamesMap[clean] or targetNamesMap[S.lockedEnemy.Name]
-		local eHum = S.lockedEnemy:FindFirstChildOfClass("Humanoid")
-		local eHrp = S.lockedEnemy:FindFirstChild("HumanoidRootPart")
-		if matches and eHum and eHum.Health > 0 and eHrp then
-			local d = (eHrp.Position - hrp.Position).Magnitude
-			if not maxRadius or d <= maxRadius then
-				return S.lockedEnemy
+		local exp = stuckEnemyBlacklist[S.lockedEnemy]
+		if not exp or now >= exp then
+			local eName = S.lockedEnemy.Name
+			local matches = (not targetNamesMap) or targetNamesMap[eName]
+			if not matches and eName:find("[", 1, true) then
+				local clean = eName:gsub("%s*%[.-%]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+				matches = targetNamesMap[clean]
+			end
+			local eHum = S.lockedEnemy:FindFirstChildOfClass("Humanoid")
+			local eHrp = getMobRootPart(S.lockedEnemy)
+			if matches and eHum and eHum.Health > 0 and eHrp and eHrp.Position.Y > -200 then
+				local d = (eHrp.Position - hrp.Position).Magnitude
+				if lastLockedEnemyRef ~= S.lockedEnemy then
+					lastLockedEnemyRef = S.lockedEnemy
+					lastLockedEnemyHP = eHum.Health
+					lastLockedDamageClock = now
+				else
+					if eHum.Health < (lastLockedEnemyHP or eHum.Health) - 0.1 or d > 75 then
+						lastLockedEnemyHP = eHum.Health
+						lastLockedDamageClock = now
+					elseif (now - lastLockedDamageClock) >= 8.0 then
+						-- Mob took zero damage for 8s while in range: skip it temporarily so other mobs get killed!
+						stuckEnemyBlacklist[S.lockedEnemy] = now + 10.0
+						S.lockedEnemy = nil
+						lastLockedEnemyRef = nil
+					end
+				end
+				if S.lockedEnemy and (not maxRadius or d <= maxRadius) then
+					return S.lockedEnemy
+				end
 			end
 		end
 	end
 
 	local bestEnemy = nil
 	local bestDist = maxRadius or math.huge
+	local fallbackEnemy = nil
+	local fallbackDist = maxRadius or math.huge
 
 	for _, enemy in ipairs(enemiesFolder:GetChildren()) do
-		local clean = enemy.Name:gsub(" %[Raid Boss%]", ""):gsub(" %[Boss%]", ""):gsub(" %[Lv%. %d+%]", "")
-		local matches = (not targetNamesMap) or targetNamesMap[clean] or targetNamesMap[enemy.Name]
+		local eName = enemy.Name
+		local matches = (not targetNamesMap) or targetNamesMap[eName]
+		if not matches and eName:find("[", 1, true) then
+			local clean = eName:gsub("%s*%[.-%]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+			matches = targetNamesMap[clean]
+		end
 		if matches then
 			local eHum = enemy:FindFirstChildOfClass("Humanoid")
-			local eHrp = enemy:FindFirstChild("HumanoidRootPart")
-			if eHum and eHum.Health > 0 and eHrp then
+			local eHrp = getMobRootPart(enemy)
+			if eHum and eHum.Health > 0 and eHrp and eHrp.Position.Y > -200 then
 				local d = (eHrp.Position - hrp.Position).Magnitude
-				if d <= bestDist then
-					bestDist = d
-					bestEnemy = enemy
+				local blUntil = stuckEnemyBlacklist[enemy]
+				if not blUntil or now >= blUntil then
+					stuckEnemyBlacklist[enemy] = nil
+					if d <= bestDist then
+						bestDist = d
+						bestEnemy = enemy
+					end
+				elseif d <= fallbackDist then
+					fallbackDist = d
+					fallbackEnemy = enemy
 				end
 			end
 		end
 	end
 
-	S.lockedEnemy = bestEnemy
-	return bestEnemy
+	local chosen = bestEnemy or fallbackEnemy
+	S.lockedEnemy = chosen
+	lastLockedEnemyRef = chosen
+	if chosen then
+		local cHum = chosen:FindFirstChildOfClass("Humanoid")
+		lastLockedEnemyHP = cHum and cHum.Health or nil
+		lastLockedDamageClock = now
+	end
+	return chosen
 end
 
 --------------------------------------------------------------------------------
@@ -13695,10 +13753,10 @@ do
 			for _, folder in ipairs({enemies, Workspace:FindFirstChild("SeaEvents")}) do
 				if folder then
 					for _, ship in ipairs(folder:GetChildren()) do
-						if ship:IsA("Model") then
+						if ship:IsA("Model") and not ship:FindFirstChild("Owner") and ship:GetAttribute("Owner") == nil then
 							local n = ship.Name
-							local isPirateShip = sel["Pirate Ship Raid"] and (n == "PirateBrigade" or n == "PirateGrandBrigade")
-							local isGhostShip = sel["Ghost Ship Raid"] and (n == "FishBoat" or n:find("GhostShip"))
+							local isPirateShip = sel["Pirate Ship Raid"] and (n == "PirateBrigade" or n == "PirateGrandBrigade" or n == "PirateSloop" or n == "MarineBrigade" or n == "MarineGrandBrigade")
+							local isGhostShip = sel["Ghost Ship Raid"] and (n == "FishBoat" or n:find("GhostShip") or n:find("HauntedShip"))
 							if isPirateShip or isGhostShip then
 								local alive = isEntityAlive(ship)
 								local part = ship:FindFirstChild("Engine")
@@ -13713,7 +13771,7 @@ do
 										label = isGhostShip and "👻 Ghost Ship Raid" or "🏴‍☠️ Pirate Ship Raid",
 										model = ship,
 										part = part,
-										hoverY = 26,
+										hoverY = 24,
 									}
 								end
 							end
@@ -13723,39 +13781,50 @@ do
 			end
 		end
 
-		-- 4) Ocean Mobs (Piranha -> Shark -> Fish Crew Member -> Haunted Shipwreck)
-		if enemies then
-			local bestMob, bestPart, bestKind, bestHover, bestScore = nil, nil, nil, 22, math.huge
-			for _, en in ipairs(enemies:GetChildren()) do
-				local alive = isEntityAlive(en)
-				local part = en:FindFirstChild("HumanoidRootPart") or en:FindFirstChildWhichIsA("BasePart")
-				if alive and part then
-					local d = (part.Position - refPos).Magnitude
-					if d <= 2000 then
-						local clean = Others.cleanEntityName(en.Name)
-						local matchedKind = nil
-						local hover = 22
-						local prioBonus = 0
-						if sel["Piranha"] and clean:find("Piranha") then
-							matchedKind = "Piranha"
-							hover = 26
-							prioBonus = -500 -- Kill Piranhas first!
-						elseif sel["Shark"] and clean == "Shark" then
-							matchedKind = "Shark"
-							hover = 22
-						elseif sel["Fish Crew Member"] and (clean:find("Fish Crew") or clean:find("Fisherman")) then
-							matchedKind = "Fish Crew Member"
-							hover = 22
-						elseif sel["Haunted Shipwreck"] and (clean:find("Haunted") or clean:find("Shipwreck")) then
-							matchedKind = "Haunted Shipwreck"
-							hover = 22
-						end
-						if matchedKind and (d + prioBonus) < bestScore then
-							bestScore = d + prioBonus
-							bestMob = en
-							bestPart = part
-							bestKind = matchedKind
-							bestHover = hover
+		-- 4) Ocean Mobs & Haunted Shipwreck (Piranha -> Shark -> Fish Crew Member -> Haunted Shipwreck)
+		do
+			local bestMob, bestPart, bestKind, bestHover, bestScore = nil, nil, nil, 16, math.huge
+			for _, folder in ipairs({enemies, Workspace:FindFirstChild("SeaEvents")}) do
+				if folder then
+					for _, en in ipairs(folder:GetChildren()) do
+						if en:IsA("Model") and not en:FindFirstChild("Owner") and en:GetAttribute("Owner") == nil then
+							local alive = isEntityAlive(en)
+							local part = en:FindFirstChild("HumanoidRootPart")
+								or en:FindFirstChild("UpperTorso")
+								or en:FindFirstChild("Engine")
+								or en:FindFirstChild("Body")
+								or en.PrimaryPart
+								or en:FindFirstChildWhichIsA("BasePart")
+							if alive and part then
+								local d = (part.Position - refPos).Magnitude
+								if d <= 2000 then
+									local clean = Others.cleanEntityName(en.Name)
+									local matchedKind = nil
+									local hover = 16
+									local prioBonus = 0
+									if sel["Piranha"] and clean:find("Piranha") then
+										matchedKind = "Piranha"
+										hover = 16
+										prioBonus = -500 -- Kill Piranhas first!
+									elseif sel["Shark"] and (clean == "Shark" or (clean:find("Shark") and not clean:find("Terrorshark"))) then
+										matchedKind = "Shark"
+										hover = 15
+									elseif sel["Fish Crew Member"] and (clean:find("Fish Crew") or clean:find("Fisherman") or clean:find("Ship Crew")) then
+										matchedKind = "Fish Crew Member"
+										hover = 15
+									elseif sel["Haunted Shipwreck"] and (clean:find("Haunted") or clean:find("Shipwreck")) then
+										matchedKind = "Haunted Shipwreck"
+										hover = 22
+									end
+									if matchedKind and (d + prioBonus) < bestScore then
+										bestScore = d + prioBonus
+										bestMob = en
+										bestPart = part
+										bestKind = matchedKind
+										bestHover = hover
+									end
+								end
+							end
 						end
 					end
 				end
@@ -13767,7 +13836,7 @@ do
 					model = bestMob,
 					part = bestPart,
 					hoverY = bestHover,
-					bringable = true,
+					bringable = (bestKind ~= "Haunted Shipwreck"),
 				}
 			end
 		end
@@ -13797,10 +13866,9 @@ do
 		ensureBusoHaki()
 
 		-- Built-in default Sea Event combat:
-		-- Piranhas, Fish Crew Member & Sharks -> Normal Melee M1
+		-- Piranhas, Fish Crew Member & Sharks -> Normal Melee M1 (no pre-equip throttle conflict)
 		-- Everything else (Sea Beast, Terrorshark, Pirate/Ghost Ship, Haunted Shipwreck, Leviathan) -> Gun, Sword & Melee skills
 		if kind == "Piranha" or kind == "Fish Crew Member" or kind == "Shark" then
-			equipWeaponType("Melee")
 			performNormalAttack("Melee", targetModel, true)
 			return
 		end
@@ -13875,10 +13943,12 @@ do
 
 		local distToCenter = Vector2.new(targetX - refCheckPos.X, targetZ - refCheckPos.Z).Magnitude
 
-		-- 1) Check Active Hostile Sea Events once in/near selected zone (or when autoSeaEvent is OFF)
-		local shouldScanEvents = (not S.autoSeaEvent) or Others.arrivedSelectedSeaZone
+		-- 1) Check Active Hostile Sea Events once in/near selected zone (or while finishing an engaged Sea Event!)
+		local stillFightingEngaged = (Others.engagedSeaModel ~= nil and Others.engagedSeaModel.Parent ~= nil)
+		local shouldScanEvents = (not S.autoSeaEvent) or Others.arrivedSelectedSeaZone or stillFightingEngaged
 		local targetInfo = shouldScanEvents and Others.findActiveSeaEventTarget(hrp.Position) or nil
 		if targetInfo and targetInfo.part and targetInfo.model then
+			Others.engagedSeaModel = targetInfo.model
 			if myBoat and mySeat then
 				Others.parkBoatSafely(myBoat, mySeat)
 			end
@@ -13896,17 +13966,17 @@ do
 
 			ensureSimulationRadius()
 
-			local hoverY = targetInfo.hoverY or 24
+			local isNormalMelee = (targetInfo.kind == "Piranha" or targetInfo.kind == "Fish Crew Member" or targetInfo.kind == "Shark")
+			local hoverY = targetInfo.hoverY or (isNormalMelee and 16 or 24)
 			local hpRatio = hum.Health / math.max(1, hum.MaxHealth)
-			if S.seaDodgeAttacks then
+			if S.seaDodgeAttacks and not isNormalMelee then
 				if hpRatio < 0.38 then
-					hoverY = math.max(hoverY + 35, 72)
+					hoverY = math.min(math.max(hoverY + 18, 46), 54)
 				elseif targetInfo.kind == "Terrorshark" and (math.floor(os.clock() * 1.5) % 4 == 0) then
-					hoverY = hoverY + 18
+					hoverY = hoverY + 14
 				end
 			end
 
-			local isNormalMelee = (targetInfo.kind == "Piranha" or targetInfo.kind == "Fish Crew Member" or targetInfo.kind == "Shark")
 			local atkDesc = isNormalMelee and "Melee" or "Skills (Gun/Sword/Melee)"
 			local combatPos = targetInfo.part.Position + Vector3.new(0, hoverY, 2.5)
 			setStatus(string.format("%s: Atacando con %s [%dm]...", targetInfo.label, atkDesc, math.floor((hrp.Position - targetInfo.part.Position).Magnitude)))
@@ -13919,6 +13989,7 @@ do
 			Others.fireSeaEventWeaponsAndSkills(targetInfo.model, targetInfo.part, targetInfo.kind)
 			return true
 		end
+		Others.engagedSeaModel = nil
 
 		if not S.autoSeaEvent then
 			return false
