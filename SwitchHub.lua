@@ -1687,7 +1687,7 @@ end
 
 local function tryRequestEntrance(destPos, entrancePart)
 	if not CommF_ or not destPos then return false end
-	if os.clock() - lastEntranceAttempt < 0.65 then return false end
+	if os.clock() - lastEntranceAttempt < 0.85 then return false end
 	lastEntranceAttempt = os.clock()
 
 	local char = LocalPlayer.Character
@@ -1704,14 +1704,7 @@ local function tryRequestEntrance(destPos, entrancePart)
 		end
 	end)
 
-	-- Also fire touch interest on the physical portal part if available
-	if entrancePart and entrancePart:IsA("BasePart") and firetouchinterest then
-		pcall(function()
-			firetouchinterest(hrp, entrancePart, 0)
-			firetouchinterest(hrp, entrancePart, 1)
-		end)
-	end
-
+	local startPos = hrp.Position
 	local ok, res = pcall(function()
 		return CommF_:InvokeServer("requestEntrance", destPos)
 	end)
@@ -1724,7 +1717,20 @@ local function tryRequestEntrance(destPos, entrancePart)
 		hrp.CFrame = CFrame.new(res)
 		return true
 	end
-	if hrp and (hrp.Position - destPos).Magnitude < 120 then
+
+	-- Fallback: touch portal hitbox with a body limb accepted by AnimateEntrance (not HumanoidRootPart)
+	if entrancePart and entrancePart:IsA("BasePart") and firetouchinterest then
+		local touchPart = char:FindFirstChild("UpperTorso")
+			or char:FindFirstChild("LowerTorso")
+			or char:FindFirstChild("Torso")
+			or hrp
+		pcall(function()
+			firetouchinterest(touchPart, entrancePart, 0)
+			firetouchinterest(touchPart, entrancePart, 1)
+		end)
+	end
+
+	if hrp and ((hrp.Position - destPos).Magnitude < 120 or (hrp.Position - startPos).Magnitude > 140) then
 		if S.activeTween then
 			pcall(function() S.activeTween:Cancel() end)
 			S.activeTween = nil
@@ -1869,22 +1875,37 @@ local function resolveSmartPortalRoute(hrpPos, targetPos)
 	end
 
 	-- 3) SEA 3: CASTLE ON THE SEA <-> FLOATING TURTLE (MANSION) <-> HYDRA ISLAND PORTALS
+	if S.portalBypassUntil and os.clock() < S.portalBypassUntil then
+		return nil
+	end
+
+	local function getSea3Portal(mapChildName, modelName, fallbackPos)
+		local folder = map and map:FindFirstChild(mapChildName)
+		local model = folder and folder:FindFirstChild(modelName)
+		local hb = model and model:FindFirstChild("Hitbox")
+		if hb and hb:IsA("BasePart") then
+			return hb.CFrame.Position, hb
+		end
+		return fallbackPos, nil
+	end
+
 	local turtle = map and map:FindFirstChild("Turtle")
-	if turtle or getCurrentSeaNumber() == 3 then
+	local waterfall = map and map:FindFirstChild("Waterfall")
+	if turtle or waterfall or getCurrentSeaNumber() == 3 then
 		local hasSea3Portals = checkPortalUnlockables()
 		if hasSea3Portals then
-			local castleA = Vector3.new(-5091.9, 314.5, -2967.2)
-			local castleB = Vector3.new(-5073.5, 314.5, -3153.0)
-			local turtleB = Vector3.new(-12462.6, 374.9, -7551.8)
-			local hydraA  = Vector3.new(5748.9, 610.5, -282.5)
+			local castleA, castleAPart = getSea3Portal("Boat Castle", "MapTeleportA", Vector3.new(-5060.41162109375, 318.50201416015625, -3193.224853515625))
+			local castleB, castleBPart = getSea3Portal("Boat Castle", "MapTeleportB", Vector3.new(-5027.0302734375, 318.50201416015625, -3206.70361328125))
+			local turtleB, turtleBPart = getSea3Portal("Turtle", "MapTeleportB", Vector3.new(-12463.6025390625, 378.3270568847656, -7566.0830078125))
+			local hydraA, hydraAPart   = getSea3Portal("Waterfall", "MapTeleportA", Vector3.new(5650.94775390625, 1017.2747802734375, -350.3791809082031))
 
 			local directDist = (hrpPos - targetPos).Magnitude
 			if directDist > 4500 then
 				local sea3Links = {
-					{entrancePos = castleA, exitSpawnPos = turtleB, label = "Portal Castillo -> Mansión (Turtle)"},
-					{entrancePos = turtleB, exitSpawnPos = castleA, label = "Portal Mansión -> Castillo del Mar"},
-					{entrancePos = castleB, exitSpawnPos = hydraA,  label = "Portal Castillo -> Hydra Island"},
-					{entrancePos = hydraA,  exitSpawnPos = castleB, label = "Portal Hydra -> Castillo del Mar"},
+					{entrancePos = castleA, exitSpawnPos = turtleB, entrancePart = castleAPart, label = "Portal Castillo -> Mansión (Turtle)"},
+					{entrancePos = turtleB, exitSpawnPos = castleA, entrancePart = turtleBPart, label = "Portal Mansión -> Castillo del Mar"},
+					{entrancePos = castleB, exitSpawnPos = hydraA,  entrancePart = castleBPart, label = "Portal Castillo -> Hydra Island"},
+					{entrancePos = hydraA,  exitSpawnPos = castleB, entrancePart = hydraAPart,  label = "Portal Hydra -> Castillo del Mar"},
 				}
 				local bestLink = nil
 				local bestTotal = directDist - 3200
@@ -1928,15 +1949,43 @@ local function moveToCFrame(targetCF, lookAtPos)
 	local portalRoute = resolveSmartPortalRoute(hrp.Position, targetPos)
 	if portalRoute then
 		local distToPortal = (hrp.Position - portalRoute.entrancePos).Magnitude
-		if distToPortal <= 35 then
-			hrp.CFrame = CFrame.new(portalRoute.entrancePos)
-			if tryRequestEntrance(portalRoute.exitSpawnPos, portalRoute.entrancePart) then
+		if distToPortal <= 40 then
+			if S.activeTween then
+				pcall(function() S.activeTween:Cancel() end)
+				S.activeTween = nil
+			end
+			if S.portalWaitKey ~= portalRoute.label then
+				S.portalWaitKey = portalRoute.label
+				S.portalWaitStart = os.clock()
+			elseif (os.clock() - (S.portalWaitStart or 0)) > 7.5 then
+				-- Portal stuck/blocked: bypass portals temporarily and fly directly so we never hover forever!
+				S.portalBypassUntil = os.clock() + 18
+				S.portalWaitKey = nil
+				S.portalWaitStart = 0
+				portalRoute = nil
+			end
+
+			if portalRoute then
+				if distToPortal > 6 then
+					hrp.CFrame = CFrame.new(portalRoute.entrancePos)
+				end
+				if (os.clock() - (S.portalWaitStart or 0)) >= 0.25 then
+					tryRequestEntrance(portalRoute.exitSpawnPos, portalRoute.entrancePart)
+				end
 				return false
 			end
+		else
+			S.portalWaitKey = nil
+			S.portalWaitStart = 0
 		end
-		-- Redirect tween target to the portal entrance
-		targetPos = portalRoute.entrancePos
-		lookAtPos = nil
+		if portalRoute then
+			-- Redirect tween target to the portal entrance
+			targetPos = portalRoute.entrancePos
+			lookAtPos = nil
+		end
+	else
+		S.portalWaitKey = nil
+		S.portalWaitStart = 0
 	end
 
 	local finalCF = lookAtPos and CFrame.lookAt(targetPos, lookAtPos) or CFrame.new(targetPos)
@@ -7001,12 +7050,59 @@ do
 	}
 
 	local ELITE_ISLAND_POSITIONS = {
-		["port"]    = Vector3.new(-290.7, 44.0, 5368.5),
-		["hydra"]   = Vector3.new(5229.8, 604.2, 345.1),
-		["tree"]    = Vector3.new(2302.5, 50.0, -6458.0),
-		["turtle"]  = Vector3.new(-13274.5, 532.0, -7579.2),
-		["castle"]  = Vector3.new(-5418.9, 313.7, -2826.2),
+		["port"]    = Vector3.new(-290.7, 56.0, 5654.0),
+		["hydra"]   = Vector3.new(4550.0, 1008.0, 380.0),
+		["tree"]    = Vector3.new(2685.4, 80.0, -7740.0),
+		["turtle"]  = Vector3.new(-13279.5, 336.0, -7897.8),
+		["castle"]  = Vector3.new(-5418.9, 316.0, -2826.2),
 	}
+
+	local ELITE_ISLAND_WAYPOINTS = {
+		["port"] = {
+			CFrame.new(-543.8, 60.0, 5654.0),
+			CFrame.new(-185.7, 88.0, 6103.6),
+			CFrame.new(-739.5, 88.0, 5833.1),
+			CFrame.new(-118.8, 60.0, 5649.2),
+		},
+		["hydra"] = {
+			CFrame.new(4547.1, 1008.0, 334.2),
+			CFrame.new(4637.9, 1084.0, 882.4),
+			CFrame.new(5650.9, 1020.0, -350.4),
+			CFrame.new(6762.5, 486.0, 110.8),
+			CFrame.new(6709.8, 58.0, -1139.0),
+		},
+		["tree"] = {
+			CFrame.new(2302.5, 56.0, -6458.0),
+			CFrame.new(2685.4, 80.0, -8066.0),
+			CFrame.new(3465.2, 128.0, -7181.8),
+			CFrame.new(3761.8, 128.0, -6823.5),
+		},
+		["turtle"] = {
+			CFrame.new(-13279.5, 336.0, -7897.8),
+			CFrame.new(-13556.1, 396.0, -9735.9),
+			CFrame.new(-13660.0, 412.0, -10211.9),
+			CFrame.new(-11902.3, 336.0, -10432.1),
+			CFrame.new(-10853.9, 336.0, -8425.2),
+			CFrame.new(-13732.0, 474.0, -6827.0),
+		},
+		["castle"] = {
+			CFrame.new(-5418.9, 318.0, -2826.2),
+			CFrame.new(-5060.4, 322.0, -3193.2),
+			CFrame.new(-5543.5, 334.0, -2964.2),
+		},
+	}
+
+	local function getNearestEliteIslandKey(pos)
+		local bestKey, bestDist = "turtle", math.huge
+		for key, islPos in pairs(ELITE_ISLAND_POSITIONS) do
+			local d = (pos - islPos).Magnitude
+			if d < bestDist then
+				bestDist = d
+				bestKey = key
+			end
+		end
+		return bestKey
+	end
 
 	Stack.padCooldownUntil = {}
 	Stack.currentStandingPadColor = nil
@@ -7018,6 +7114,10 @@ do
 	Stack.lastElitePollClock = 0
 	Stack.lastEliteAcceptClock = 0
 	Stack.eliteWaitQuestStart = 0
+	Stack.eliteAbandonAt = 0
+	Stack.repEliteArrivedAt = 0
+	Stack.repEliteTrackedPos = nil
+	Stack.hadActiveElite = false
 	Stack.eliteAvailable = false
 	Stack.eliteLastResponse = ""
 
@@ -7392,7 +7492,7 @@ do
 		local pgui = LocalPlayer:FindFirstChild("PlayerGui")
 		local tqf = pgui and pgui:FindFirstChild("TrackedQuestFrame")
 		local frame = tqf and tqf:FindFirstChild("Frame")
-		if tqf and tqf.Enabled and frame and frame.Visible then
+		if tqf and frame then
 			local desc = frame:FindFirstChild("description") and frame.description.Text or ""
 			local hdr = frame:FindFirstChild("header")
 				and frame.header:FindFirstChild("textLabel")
@@ -7442,10 +7542,12 @@ do
 			end)
 			if ok and res ~= nil then
 				local str = tostring(res):lower()
-				Stack.eliteLastResponse = str
 				if str:find("don't have anything") or str:find("come back later") or str:find("nada para ti") then
 					Stack.eliteAvailable = false
+					Stack.eliteLastResponse = ""
+					Stack.hadActiveElite = false
 				else
+					Stack.eliteLastResponse = str
 					Stack.eliteAvailable = true
 				end
 			end
@@ -7457,6 +7559,16 @@ do
 		local liveE, repE, eliteName = Stack.findElitePirate()
 		local hasEliteQ, qMobName, qDesc = Stack.getActiveEliteQuestInfo()
 
+		-- If we previously had an active Elite/Quest and both target & quest just vanished (Elite died!), re-verify instead of using stale hints
+		if Stack.hadActiveElite and not liveE and not repE and not hasEliteQ then
+			Stack.hadActiveElite = false
+			Stack.eliteLastResponse = ""
+			Stack.repEliteArrivedAt = 0
+			Stack.repEliteTrackedPos = nil
+			Stack.lastElitePollClock = 0
+			Stack.lastEliteAcceptClock = 0
+		end
+
 		-- Accept Elite Hunter quest remotely from anywhere on the map (no travel to Castle on the Sea needed!)
 		if not hasEliteQ and CommF_ then
 			if os.clock() - (Stack.lastEliteAcceptClock or 0) >= 1.5 then
@@ -7467,41 +7579,53 @@ do
 				end)
 				if ok and res ~= nil then
 					local str = tostring(res):lower()
-					Stack.eliteLastResponse = str
 					if str:find("don't have anything") or str:find("come back later") or str:find("nada para ti") then
 						Stack.eliteAvailable = false
+						Stack.eliteLastResponse = ""
+						Stack.hadActiveElite = false
+						clearFarmMover()
 						return
 					end
+					Stack.eliteLastResponse = str
 					if str:find("already") or str:find("abandon") or str:find("cancel") then
 						abandonCurrentQuestNonBlocking()
+						Stack.eliteAbandonAt = os.clock()
 					end
 				end
 				hasEliteQ, qMobName, qDesc = Stack.getActiveEliteQuestInfo()
 				if not hasEliteQ and GuideData and GuideData.Data and GuideData.Data.QuestData then
 					abandonCurrentQuestNonBlocking()
+					Stack.eliteAbandonAt = os.clock()
 				end
 			end
-			if not liveE and not repE and not hasEliteQ then
+			if not liveE and not repE and not hasEliteQ and Stack.eliteLastResponse == "" then
+				clearFarmMover()
 				return
 			end
 		end
 
 		if hasEliteQ then
 			Stack.eliteWaitQuestStart = 0
+			Stack.hadActiveElite = true
 		end
 
 		if liveE then
-			-- Before attacking the Elite Pirate, confirm the quest is active (avoid killing without credit after an abandon cooldown)
-			if not hasEliteQ and CommF_ then
+			Stack.hadActiveElite = true
+			Stack.repEliteArrivedAt = 0
+			Stack.repEliteTrackedPos = nil
+			-- Only brief wait if a normal quest was just abandoned so Blox Fruits cooldown expires before killing
+			local recentAbandon = (os.clock() - (Stack.eliteAbandonAt or 0)) < 11.0
+			local hintConfirmed = (Stack.eliteLastResponse:find("last seen") ~= nil) or (Stack.eliteLastResponse:find("roaming") ~= nil)
+			if not hasEliteQ and CommF_ and recentAbandon and not hintConfirmed then
 				if Stack.eliteWaitQuestStart == 0 then
 					Stack.eliteWaitQuestStart = os.clock()
 				end
 				local lHrp = liveE:FindFirstChild("HumanoidRootPart") or liveE:FindFirstChildWhichIsA("BasePart")
-				if lHrp and (os.clock() - Stack.eliteWaitQuestStart) < 10.0 then
+				if lHrp and (os.clock() - Stack.eliteWaitQuestStart) < 4.0 then
 					local d = (hrp.Position - lHrp.Position).Magnitude
-					if d <= 180 then
+					if d <= 160 then
 						setStatus("🎯 Elite Hunter: Esperando confirmación de misión antes de atacar...")
-						moveToCFrame(CFrame.new(lHrp.Position + Vector3.new(0, 120, 0)))
+						moveToCFrame(CFrame.new(lHrp.Position + Vector3.new(0, 48, 0)))
 						return
 					end
 				end
@@ -7511,23 +7635,58 @@ do
 		end
 
 		if repE then
+			Stack.hadActiveElite = true
 			local rPos = Stack.getModelPos(repE, Vector3.new(-5418.9, 330.0, -2826.2))
-			setStatus(string.format("🎯 Elite Hunter: Volando hacia %s [%dm]...", tostring(eliteName or repE.Name), math.floor((hrp.Position - rPos).Magnitude)))
-			moveToCFrame(CFrame.new(rPos + Vector3.new(0, 25, 0)))
-			return
-		end
-
-		-- Fallback: check island mentioned in quest description or Elite Hunter response
-		local hint = (tostring(qDesc) .. " " .. tostring(Stack.eliteLastResponse)):lower()
-		for key, islPos in pairs(ELITE_ISLAND_POSITIONS) do
-			if hint:find(key, 1, true) then
-				setStatus(string.format("🎯 Elite Hunter: Buscando a %s en isla (%s)...", tostring(qMobName or "Elite"), key))
-				moveToCFrame(CFrame.new(islPos + Vector3.new(0, 35, 0)))
+			if not Stack.repEliteTrackedPos or (Stack.repEliteTrackedPos - rPos).Magnitude > 220 then
+				Stack.repEliteTrackedPos = rPos
+				Stack.repEliteArrivedAt = 0
+			end
+			local distToRep = (hrp.Position - rPos).Magnitude
+			if distToRep <= 75 then
+				if Stack.repEliteArrivedAt == 0 then
+					Stack.repEliteArrivedAt = os.clock()
+				end
+				-- If repE position didn't stream a live enemy within 2.5s, sweep the island instead of hovering motionless!
+				if (os.clock() - Stack.repEliteArrivedAt) < 2.5 then
+					setStatus(string.format("🎯 Elite Hunter: Acercándose a %s [%dm]...", tostring(eliteName or repE.Name), math.floor(distToRep)))
+					moveToCFrame(CFrame.new(rPos + Vector3.new(0, 22, 0)))
+					return
+				end
+			else
+				Stack.repEliteArrivedAt = 0
+				setStatus(string.format("🎯 Elite Hunter: Volando hacia %s [%dm]...", tostring(eliteName or repE.Name), math.floor(distToRep)))
+				moveToCFrame(CFrame.new(rPos + Vector3.new(0, 25, 0)))
 				return
 			end
 		end
 
-		setStatus("🎯 Elite Hunter: Buscando Elite Pirate activo...")
+		-- Fallback: patrol multi-point island waypoints (never freeze motionless at a single coordinate!)
+		local hint = (tostring(qDesc) .. " " .. tostring(Stack.eliteLastResponse)):lower()
+		local chosenKey = nil
+		for _, key in ipairs({"turtle", "hydra", "tree", "port", "castle"}) do
+			if hint:find(key, 1, true) then
+				chosenKey = key
+				break
+			end
+		end
+		if not chosenKey and Stack.repEliteTrackedPos then
+			chosenKey = getNearestEliteIslandKey(Stack.repEliteTrackedPos)
+		end
+
+		if chosenKey and ELITE_ISLAND_WAYPOINTS[chosenKey] then
+			setStatus(string.format("🎯 Elite Hunter: Patrullando %s buscando a %s...", chosenKey, tostring(qMobName or eliteName or "Elite")))
+			patrolAroundSpawns("ElitePatrol_" .. chosenKey, ELITE_ISLAND_WAYPOINTS[chosenKey])
+			return
+		end
+
+		local allSweep = {}
+		for _, k in ipairs({"turtle", "hydra", "tree", "port"}) do
+			for _, cf in ipairs(ELITE_ISLAND_WAYPOINTS[k]) do
+				table.insert(allSweep, cf)
+			end
+		end
+		setStatus("🎯 Elite Hunter: Patrullando islas del Sea 3 buscando Elite Pirate...")
+		patrolAroundSpawns("ElitePatrol_All", allSweep)
 	end
 
 	function Stack.executeSummonDoughKingStep(sweetChaliceTool, hrp)
