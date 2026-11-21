@@ -11279,6 +11279,9 @@ do
 	Others.hadActiveSeaBoat = false
 	Others.returningFrom10km = false
 	Others.arrivedSelectedSeaZone = false
+	Others.activeBoatDrive = nil
+	Others.boatSeatedPart = nil
+	Others.boatSeatedSince = 0
 	Others.lastBoatResetClock = 0
 	Others.seaPatrolIdx = 1
 	Others.lastSeaPatrolSwitch = 0
@@ -11440,7 +11443,48 @@ do
 		end)
 	end
 
+	function Others.pivotBoatSeatTo(boat, seat, targetSeatPos, lookPosXZ)
+		if not boat or not seat then return end
+		local pivotCF = boat:GetPivot()
+		local seatCF = seat.CFrame
+		if lookPosXZ then
+			local flatTarget = Vector3.new(lookPosXZ.X, targetSeatPos.Y, lookPosXZ.Z)
+			if (flatTarget - targetSeatPos).Magnitude > 1 then
+				local seatToPivot = seatCF:ToObjectSpace(pivotCF)
+				local newSeatCF = CFrame.lookAt(targetSeatPos, flatTarget)
+				boat:PivotTo(newSeatCF * seatToPivot)
+				return newSeatCF
+			end
+		end
+		local delta = targetSeatPos - seatCF.Position
+		boat:PivotTo(CFrame.new(pivotCF.Position + delta) * (pivotCF - pivotCF.Position))
+		return CFrame.new(targetSeatPos) * (seatCF - seatCF.Position)
+	end
+
+	function Others.setBoatNoClip(boat, enable)
+		if not boat then return end
+		pcall(function()
+			for _, p in ipairs(boat:GetDescendants()) do
+				if p:IsA("BasePart") then
+					if enable then
+						if p:GetAttribute("_SHOrigCC") == nil then
+							p:SetAttribute("_SHOrigCC", p.CanCollide)
+						end
+						p.CanCollide = false
+					else
+						local orig = p:GetAttribute("_SHOrigCC")
+						if type(orig) == "boolean" then
+							p.CanCollide = orig
+							p:SetAttribute("_SHOrigCC", nil)
+						end
+					end
+				end
+			end
+		end)
+	end
+
 	function Others.stopBoatMotion(boat, seat)
+		Others.activeBoatDrive = nil
 		if not seat then return end
 		pcall(function()
 			local bv = seat:FindFirstChild("SwitchHubBoatBV")
@@ -11454,10 +11498,14 @@ do
 
 	function Others.cleanupBoatMovers()
 		S.isBoardingBoat = false
+		Others.activeBoatDrive = nil
+		Others.boatSeatedPart = nil
+		Others.boatSeatedSince = 0
 		local boatsFolder = Workspace:FindFirstChild("Boats")
 		if not boatsFolder then return end
 		for _, b in ipairs(boatsFolder:GetChildren()) do
 			Others.suppressNativeBoatMovers(b, false)
+			Others.setBoatNoClip(b, false)
 			for _, desc in ipairs(b:GetDescendants()) do
 				if desc:IsA("BodyVelocity") and desc.Name == "SwitchHubBoatBV" then
 					desc:Destroy()
@@ -11471,19 +11519,23 @@ do
 
 	function Others.parkBoatSafely(boat, seat)
 		if not boat or not seat then return end
+		Others.activeBoatDrive = nil
 		pcall(function()
 			Others.suppressNativeBoatMovers(boat, S.seaSafeBoatFly == true)
+			local mass = math.max(500, seat.AssemblyMass or 5000)
 			local bv = seat:FindFirstChild("SwitchHubBoatBV")
 			if not bv then
 				bv = Instance.new("BodyVelocity")
 				bv.Name = "SwitchHubBoatBV"
-				bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
 				bv.Parent = seat
 			end
+			bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+			bv.P = math.max(1e7, mass * 1500)
 			bv.Velocity = Vector3.zero
+			seat.AssemblyLinearVelocity = Vector3.zero
 			seat.AssemblyAngularVelocity = Vector3.zero
-			if S.seaSafeBoatFly and seat.Position.Y < 68 then
-				boat:PivotTo(CFrame.new(seat.Position.X, 75, seat.Position.Z))
+			if S.seaSafeBoatFly and seat.Position.Y < 42 then
+				Others.pivotBoatSeatTo(boat, seat, Vector3.new(seat.Position.X, 48, seat.Position.Z), nil)
 			end
 		end)
 	end
@@ -11598,6 +11650,8 @@ do
 
 		-- 3) Board the VehicleSeat (pause boat velocity so it NEVER sails away without the player!)
 		if hum.SeatPart ~= mySeat then
+			Others.boatSeatedPart = nil
+			Others.boatSeatedSince = 0
 			Others.stopBoatMotion(myBoat, mySeat)
 			local dSeat = (hrp.Position - mySeat.Position).Magnitude
 			S.isBoardingBoat = (dSeat <= 45)
@@ -11615,9 +11669,108 @@ do
 			return false
 		end
 
+		if Others.boatSeatedPart ~= mySeat then
+			Others.boatSeatedPart = mySeat
+			Others.boatSeatedSince = os.clock()
+		end
 		S.isBoardingBoat = false
 		return true
 	end
+
+	local lastBoatPrepClock = 0
+	local lastBoatPrepRef = nil
+	connect(RunService.Stepped, function(_, rawDt)
+		local drive = Others.activeBoatDrive
+		if not drive then return end
+		if not isAlive() or (os.clock() - drive.updatedAt > 0.5) then
+			Others.activeBoatDrive = nil
+			return
+		end
+		local boat, seat, wp = drive.boat, drive.seat, drive.wp
+		local char = LocalPlayer.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if not boat or not boat.Parent or not seat or not seat.Parent or not hum or hum.SeatPart ~= seat then
+			Others.activeBoatDrive = nil
+			return
+		end
+
+		-- Wait briefly right after sitting so Roblox transfers NetworkOwnership before toggling boat collisions/movers
+		if (os.clock() - (Others.boatSeatedSince or 0)) < 0.25 then
+			pcall(function()
+				seat.ThrottleFloat = 0
+				seat.SteerFloat = 0
+			end)
+			return
+		end
+
+		local dt = math.clamp(rawDt or (1 / 60), 1 / 120, 0.05)
+		local safeFly = drive.seaSafeFly == true
+		if boat ~= lastBoatPrepRef or (os.clock() - lastBoatPrepClock >= 0.35) then
+			lastBoatPrepRef = boat
+			lastBoatPrepClock = os.clock()
+			Others.suppressNativeBoatMovers(boat, safeFly)
+			Others.setBoatNoClip(boat, safeFly)
+		end
+
+		pcall(function()
+			seat.ThrottleFloat = 0
+			seat.SteerFloat = 0
+			seat.AssemblyLinearVelocity = Vector3.zero
+			seat.AssemblyAngularVelocity = Vector3.zero
+			if hrp then
+				hrp.AssemblyLinearVelocity = Vector3.zero
+			end
+
+			local mass = math.max(500, seat.AssemblyMass or 5000)
+			local bv = seat:FindFirstChild("SwitchHubBoatBV")
+			if not bv then
+				bv = Instance.new("BodyVelocity")
+				bv.Name = "SwitchHubBoatBV"
+				bv.Parent = seat
+			end
+			bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+			bv.P = math.max(1e7, mass * 1500)
+			bv.Velocity = Vector3.zero
+
+			local bg = seat:FindFirstChild("SwitchHubBoatBG")
+			if not bg then
+				bg = Instance.new("BodyGyro")
+				bg.Name = "SwitchHubBoatBG"
+				bg.Parent = seat
+			end
+			bg.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+			bg.P = math.max(5e6, mass * 800)
+			bg.D = math.max(5e4, mass * 50)
+
+			local curPos = seat.Position
+			local altDiff = wp.Y - curPos.Y
+			local flatDelta = Vector3.new(wp.X - curPos.X, 0, wp.Z - curPos.Z)
+			local flatDist = flatDelta.Magnitude
+
+			-- Climb gently off water/ground first, then fly horizontally together with the boat at moderate speed
+			local vy = math.clamp(altDiff * 4.0, -45, 52)
+			if safeFly and altDiff > 8 then
+				vy = math.max(vy, 28)
+			end
+			local horizScale = (safeFly and altDiff > 10) and 0.25 or 1.0
+			local cruiseSpeed = (flatDist < 70) and math.max(30, flatDist * 1.8) or drive.speed
+			local horizStep = (flatDist > 5) and (flatDelta.Unit * (cruiseSpeed * horizScale * dt)) or Vector3.zero
+			if horizStep.Magnitude > flatDist then
+				horizStep = flatDelta
+			end
+			local dy = vy * dt
+			if math.abs(dy) > math.abs(altDiff) then
+				dy = altDiff
+			end
+
+			local nextPos = Vector3.new(curPos.X + horizStep.X, curPos.Y + dy, curPos.Z + horizStep.Z)
+			local newSeatCF = Others.pivotBoatSeatTo(boat, seat, nextPos, (flatDist > 2) and wp or nil)
+			if newSeatCF then
+				bg.CFrame = newSeatCF
+			end
+		end)
+	end)
 
 	function Others.driveBoatSeatTo(myBoat, mySeat, wp, hrp, seaNum)
 		if S.activeTween then
@@ -11628,18 +11781,6 @@ do
 			hrp.SwitchHubBV:Destroy()
 		end
 
-		Others.suppressNativeBoatMovers(myBoat, S.seaSafeBoatFly == true)
-
-		if S.seaSafeBoatFly then
-			pcall(function()
-				for _, p in ipairs(myBoat:GetDescendants()) do
-					if p:IsA("BasePart") and p.CanCollide then
-						p.CanCollide = false
-					end
-				end
-			end)
-		end
-
 		local dockOrigin = (seaNum == 3) and SEA3_DOCK_ORIGIN or SEA2_DOCK_ORIGIN
 		local distFromDock = Vector2.new(mySeat.Position.X - dockOrigin.X, mySeat.Position.Z - dockOrigin.Z).Magnitude
 		if distFromDock >= 300 then
@@ -11648,55 +11789,18 @@ do
 
 		local speed = math.clamp(tonumber(S.seaBoatSpeed) or 145, 70, 220)
 		local flatDelta = Vector3.new(wp.X - mySeat.Position.X, 0, wp.Z - mySeat.Position.Z)
-		local flatDist = flatDelta.Magnitude
 		local altDiff = wp.Y - mySeat.Position.Y
 
-		pcall(function()
-			mySeat.ThrottleFloat = 0
-			mySeat.SteerFloat = 0
-			mySeat.AssemblyAngularVelocity = Vector3.zero
+		Others.activeBoatDrive = {
+			boat = myBoat,
+			seat = mySeat,
+			wp = wp,
+			speed = speed,
+			seaSafeFly = (S.seaSafeBoatFly == true),
+			updatedAt = os.clock(),
+		}
 
-			local bv = mySeat:FindFirstChild("SwitchHubBoatBV")
-			if not bv then
-				bv = Instance.new("BodyVelocity")
-				bv.Name = "SwitchHubBoatBV"
-				bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
-				bv.Parent = mySeat
-			end
-			local bg = mySeat:FindFirstChild("SwitchHubBoatBG")
-			if not bg then
-				bg = Instance.new("BodyGyro")
-				bg.Name = "SwitchHubBoatBG"
-				bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
-				bg.P = 9000
-				bg.D = 500
-				bg.Parent = mySeat
-			end
-
-			local vy = math.clamp(altDiff * 3.2, -55, 75)
-			-- During initial takeoff off the dock/water, prioritize climbing clear before horizontal acceleration
-			local horizScale = (S.seaSafeBoatFly and altDiff > 18) and 0.25 or 1.0
-			local cruiseSpeed = (flatDist < 70) and math.max(30, flatDist * 1.8) or speed
-			local horizVel = (flatDist > 5) and (flatDelta.Unit * (cruiseSpeed * horizScale)) or Vector3.zero
-
-			if flatDist <= 5 and math.abs(altDiff) <= 3 then
-				bv.Velocity = Vector3.zero
-			else
-				bv.Velocity = Vector3.new(horizVel.X, vy, horizVel.Z)
-			end
-
-			if flatDist > 2 then
-				bg.CFrame = CFrame.lookAt(mySeat.Position, Vector3.new(wp.X, mySeat.Position.Y, wp.Z))
-			else
-				local fwd = mySeat.CFrame.LookVector
-				local flatFwd = Vector3.new(fwd.X, 0, fwd.Z)
-				if flatFwd.Magnitude > 0.01 then
-					bg.CFrame = CFrame.lookAt(mySeat.Position, mySeat.Position + flatFwd.Unit)
-				end
-			end
-		end)
-
-		return distFromDock, math.max(flatDist, math.abs(altDiff))
+		return distFromDock, math.max(flatDelta.Magnitude, math.abs(altDiff))
 	end
 
 	-- =========================================================================
@@ -12047,7 +12151,7 @@ do
 				return true
 			end
 
-			local sailY = S.seaSafeBoatFly and 75 or 10
+			local sailY = S.seaSafeBoatFly and 48 or 10
 			local kitWaypoints = {
 				Vector3.new(-25000, sailY, 500), -- Zone 5 edge
 				Vector3.new(-26800, sailY, 500), -- Zone 6 (???) spawn trigger (< 10 km from Tiki!)
@@ -13211,7 +13315,7 @@ do
 					Others.returningFrom10km = false
 				end
 
-				local sailY = S.seaSafeBoatFly and 75 or 12
+				local sailY = S.seaSafeBoatFly and 48 or 12
 				if Others.returningFrom10km then
 					local distNow = Others.driveBoatSeatTo(myBoat, mySeat, Vector3.new(-21650, sailY, 500), hrp, 3)
 					setStatus(string.format("↩️ Multi-Find (10 km): Regresando a 5.0 km [%.2f km]...", distNow / 1000))
@@ -13570,7 +13674,7 @@ do
 			Others.returningFrom10km = false
 		end
 
-		local sailY = S.seaSafeBoatFly and 75 or 10
+		local sailY = S.seaSafeBoatFly and 48 or 10
 
 		if Others.returningFrom10km then
 			local returnTarget = (seaNum == 3)
