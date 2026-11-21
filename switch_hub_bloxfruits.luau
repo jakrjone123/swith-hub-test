@@ -7016,6 +7016,8 @@ do
 	Stack.castleHakiRecheckAt = 0
 
 	Stack.lastElitePollClock = 0
+	Stack.lastEliteAcceptClock = 0
+	Stack.eliteWaitQuestStart = 0
 	Stack.eliteAvailable = false
 	Stack.eliteLastResponse = ""
 
@@ -7386,6 +7388,30 @@ do
 	end
 
 	function Stack.getActiveEliteQuestInfo()
+		-- 1) Authoritative TrackedQuestFrame check (Elite Hunter quests live here while GuideData.QuestData stays nil!)
+		local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+		local tqf = pgui and pgui:FindFirstChild("TrackedQuestFrame")
+		local frame = tqf and tqf:FindFirstChild("Frame")
+		if tqf and tqf.Enabled and frame and frame.Visible then
+			local desc = frame:FindFirstChild("description") and frame.description.Text or ""
+			local hdr = frame:FindFirstChild("header")
+				and frame.header:FindFirstChild("textLabel")
+				and frame.header.textLabel.Text or ""
+			local combined = desc .. " " .. hdr
+			local low = combined:lower()
+			if low ~= "" then
+				for eliteName in pairs(ELITE_NAMES) do
+					if low:find(eliteName:lower(), 1, true) then
+						return true, eliteName, combined
+					end
+				end
+				if low:find("elite", 1, true) then
+					return true, "Elite", combined
+				end
+			end
+		end
+
+		-- 2) Fallback GuideData / getActiveQuestStatus check
 		for eliteName in pairs(ELITE_NAMES) do
 			local hasQ, matches, desc = getActiveQuestStatus(nil, eliteName)
 			if hasQ and matches then
@@ -7431,22 +7457,55 @@ do
 		local liveE, repE, eliteName = Stack.findElitePirate()
 		local hasEliteQ, qMobName, qDesc = Stack.getActiveEliteQuestInfo()
 
-		-- Accept Elite Hunter quest first if not active
-		if not hasEliteQ and S.autoQuest and CommF_ then
-			local npcPos = Vector3.new(-5418.9, 313.7, -2826.2)
-			setStatus("🎯 Auto Elite Hunter: Aceptando misión en Castle on the Sea...")
-			local reached = moveToCFrame(CFrame.new(npcPos + Vector3.new(0, 3, 3)))
-			if reached or (hrp.Position - npcPos).Magnitude <= 35 then
-				pcall(function()
-					CommF_:InvokeServer("EliteHunter")
+		-- Accept Elite Hunter quest remotely from anywhere on the map (no travel to Castle on the Sea needed!)
+		if not hasEliteQ and CommF_ then
+			if os.clock() - (Stack.lastEliteAcceptClock or 0) >= 1.5 then
+				Stack.lastEliteAcceptClock = os.clock()
+				setStatus("🎯 Auto Elite Hunter: Aceptando misión desde lejos...")
+				local ok, res = pcall(function()
+					return CommF_:InvokeServer("EliteHunter")
 				end)
+				if ok and res ~= nil then
+					local str = tostring(res):lower()
+					Stack.eliteLastResponse = str
+					if str:find("don't have anything") or str:find("come back later") or str:find("nada para ti") then
+						Stack.eliteAvailable = false
+						return
+					end
+					if str:find("already") or str:find("abandon") or str:find("cancel") then
+						abandonCurrentQuestNonBlocking()
+					end
+				end
+				hasEliteQ, qMobName, qDesc = Stack.getActiveEliteQuestInfo()
+				if not hasEliteQ and GuideData and GuideData.Data and GuideData.Data.QuestData then
+					abandonCurrentQuestNonBlocking()
+				end
 			end
-			if not liveE and not repE then
+			if not liveE and not repE and not hasEliteQ then
 				return
 			end
 		end
 
+		if hasEliteQ then
+			Stack.eliteWaitQuestStart = 0
+		end
+
 		if liveE then
+			-- Before attacking the Elite Pirate, confirm the quest is active (avoid killing without credit after an abandon cooldown)
+			if not hasEliteQ and CommF_ then
+				if Stack.eliteWaitQuestStart == 0 then
+					Stack.eliteWaitQuestStart = os.clock()
+				end
+				local lHrp = liveE:FindFirstChild("HumanoidRootPart") or liveE:FindFirstChildWhichIsA("BasePart")
+				if lHrp and (os.clock() - Stack.eliteWaitQuestStart) < 10.0 then
+					local d = (hrp.Position - lHrp.Position).Magnitude
+					if d <= 180 then
+						setStatus("🎯 Elite Hunter: Esperando confirmación de misión antes de atacar...")
+						moveToCFrame(CFrame.new(lHrp.Position + Vector3.new(0, 120, 0)))
+						return
+					end
+				end
+			end
 			engageEnemy(liveE, ELITE_NAMES, "🎯 Elite Hunter")
 			return
 		end
