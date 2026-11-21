@@ -11465,13 +11465,14 @@ do
 	local SEA2_DOCK_ORIGIN = Vector3.new(-2818.8, 28, -9428.7) -- Sea 2 Open Ocean Dock
 
 	-- Danger Zone 1..6 fallback centers (auto-calibrated live against Blox Fruits Compass / Danger UI)
+	-- Note: 1 Roblox stud ≈ 0.28m on Blox Fruits Compass (Tiki at X ≈ -16,917)
 	local SEA3_ZONE_CENTERS = {
-		[1] = Vector3.new(-19600, 62, 500),
-		[2] = Vector3.new(-23000, 62, 500),
-		[3] = Vector3.new(-26600, 62, 500),
-		[4] = Vector3.new(-30400, 62, 500),
-		[5] = Vector3.new(-34400, 62, 500),
-		[6] = Vector3.new(-38600, 62, 500),
+		[1] = Vector3.new(-21400, 62, 500), -- ~4.5k studs
+		[2] = Vector3.new(-26800, 62, 500), -- ~9.9k studs
+		[3] = Vector3.new(-31200, 62, 500), -- ~14.3k studs
+		[4] = Vector3.new(-35000, 62, 500), -- ~18.1k studs
+		[5] = Vector3.new(-38600, 62, 500), -- ~21.7k studs (Zona 5)
+		[6] = Vector3.new(-45200, 62, 500), -- ~28.3k studs (Zona 6 - ???)
 	}
 
 	local SEA2_ZONE_CENTERS = {
@@ -11485,12 +11486,12 @@ do
 
 	-- Minimum open-sea distance from dock before a Danger Zone reading can ever count as "arrived"
 	local MIN_ZONE_DIST_SEA3 = {
-		[1] = 1400,
-		[2] = 3400,
-		[3] = 5600,
-		[4] = 8000,
-		[5] = 10500,
-		[6] = 13000,
+		[1] = 2800,
+		[2] = 7500,
+		[3] = 11500,
+		[4] = 15500,
+		[5] = 19000,
+		[6] = 23200, -- Past X ≈ -40,100 so Zone 5 (~21.7k studs) can never be locked as Zone 6
 	}
 	local MIN_ZONE_DIST_SEA2 = {
 		[1] = 1000,
@@ -11509,13 +11510,14 @@ do
 		Others.lastDangerPollClock = now
 
 		-- Near Tiki Outpost or Sea 2 dock we are still in port / safe waters: never trust dock UI labels as sea danger
+		local dDockNow = 0
 		local char = LocalPlayer.Character
 		local hrp = char and char:FindFirstChild("HumanoidRootPart")
 		if hrp then
 			local seaNum = getCurrentSeaNumber()
 			local dock = (seaNum == 3) and SEA3_DOCK_ORIGIN or SEA2_DOCK_ORIGIN
-			local dDock = Vector2.new(hrp.Position.X - dock.X, hrp.Position.Z - dock.Z).Magnitude
-			if dDock < 1100 then
+			dDockNow = Vector2.new(hrp.Position.X - dock.X, hrp.Position.Z - dock.Z).Magnitude
+			if dDockNow < 1100 then
 				Others.cachedDangerLevel = nil
 				return nil
 			end
@@ -11526,39 +11528,48 @@ do
 			local pgui = LocalPlayer:FindFirstChild("PlayerGui")
 			if not pgui then return end
 
-			local function parseDangerText(txt, isDangerWidget)
+			local function parseDangerText(txt, isDangerWidget, isCompassWidget)
 				if type(txt) ~= "string" or txt == "" then return nil end
 				local low = txt:lower()
 				if low:find("zona") or low:find("patrull") or low:find("volando") or low:find("lv%.") or low:find("hp") or low:find("km") or low:find("beli") or txt:find("/") then
 					return nil
 				end
-				-- Explicit "Danger: 0..6" or "Danger Level: ???" works even if parent widget name changed
+
 				local explicitNum = low:match("danger[^%d%?]*([0-6])") or low:match("peligro[^%d%?]*([0-6])")
 				if explicitNum then
 					return tonumber(explicitNum)
 				end
-				if (low:find("danger") or low:find("peligro")) and txt:find("%?%?%?") then
-					return 6
+				if low:find("danger") or low:find("peligro") then
+					if txt:find("%?%?%?") then return 6
+					elseif low:find("%f[%a]crazy%f[%A]") or low:find("%f[%a]loco%f[%A]") then return 5
+					elseif low:find("%f[%a]extreme%f[%A]") or low:find("%f[%a]extremo%f[%A]") then return 4
+					elseif low:find("%f[%a]high%f[%A]") or low:find("%f[%a]alto%f[%A]") then return 3
+					elseif low:find("%f[%a]medium%f[%A]") or low:find("%f[%a]medio%f[%A]") then return 2
+					elseif low:find("%f[%a]low%f[%A]") or low:find("%f[%a]bajo%f[%A]") then return 1
+					end
 				end
-				-- Bare "???" or bare digit ONLY allowed on dedicated Danger / SeaLevel / RoughSea widgets (prevents Tiki HUD false positives!)
-				if isDangerWidget then
-					if txt:find("%?%?%?") or txt:match("^%s*%?+%s*$") then
+
+				-- Blox Fruits Compass / Danger widgets show exact word labels ("Low".."Crazy", "???")
+				if isDangerWidget or isCompassWidget then
+					if (isDangerWidget or dDockNow >= 18000) and (txt:find("%?%?%?") or txt:match("^%s*%?+%s*$")) then
 						return 6
 					end
-					if low:find("crazy") then
+					if low:find("%f[%a]crazy%f[%A]") or low:find("%f[%a]loco%f[%A]") then
 						return 5
-					elseif low:find("extreme") then
+					elseif low:find("%f[%a]extreme%f[%A]") or low:find("%f[%a]extremo%f[%A]") then
 						return 4
-					elseif low:find("high") then
+					elseif low:find("%f[%a]high%f[%A]") or low:find("%f[%a]alto%f[%A]") then
 						return 3
-					elseif low:find("medium") then
+					elseif low:find("%f[%a]medium%f[%A]") or low:find("%f[%a]medio%f[%A]") then
 						return 2
-					elseif low:find("low") then
+					elseif low:find("%f[%a]low%f[%A]") or low:find("%f[%a]bajo%f[%A]") then
 						return 1
 					end
-					local d = txt:match("^%s*([0-6])%s*$")
-					if d then
-						return tonumber(d)
+					if isDangerWidget then
+						local d = txt:match("^%s*([0-6])%s*$")
+						if d then
+							return tonumber(d)
+						end
 					end
 				end
 				return nil
@@ -11579,7 +11590,8 @@ do
 								or gpLow:find("quest") or gpLow:find("hp") or gpLow:find("stat")
 								or nLow:find("switchhub") or pLow:find("switchhub")
 							if not isUnrelated then
-								local val = parseDangerText(desc.Text, isDangerWidget == true)
+								local isCompassWidget = (rootName == "Compass") or pLow:find("compass") or gpLow:find("compass")
+								local val = parseDangerText(desc.Text, isDangerWidget == true, isCompassWidget == true)
 								if val ~= nil then
 									detected = val
 									return
@@ -13832,7 +13844,7 @@ do
 					Others.calibratedZoneX[calKey] = nil
 				end
 				if seaNum == 3 then
-					targetX = math.max(-48000, math.min(center.X, refCheckPos.X - 3200))
+					targetX = math.max(-54000, math.min(center.X, refCheckPos.X - 3200))
 				else
 					targetX = math.max(-18000, math.min(center.X, refCheckPos.X - 1800))
 					targetZ = math.max(-18000, math.min(center.Z, refCheckPos.Z - 900))
@@ -13842,7 +13854,7 @@ do
 				if Others.calibratedZoneX and not Others.calibratedZoneX[calKey] then
 					-- Step ~450 studs deeper inside the zone so edge-jitter never drops back to the previous zone
 					Others.calibratedZoneX[calKey] = (seaNum == 3)
-						and math.max(-48000, refCheckPos.X - 450)
+						and math.max(-54000, refCheckPos.X - 450)
 						or math.max(-18000, refCheckPos.X - 300)
 				end
 				targetX = (Others.calibratedZoneX and Others.calibratedZoneX[calKey]) or refCheckPos.X
@@ -13856,7 +13868,7 @@ do
 			end
 		else
 			local distFallback = Vector2.new(targetX - refCheckPos.X, targetZ - refCheckPos.Z).Magnitude
-			if distFallback <= 1650 then
+			if distFallback <= 600 then
 				Others.arrivedSelectedSeaZone = true
 			end
 		end
