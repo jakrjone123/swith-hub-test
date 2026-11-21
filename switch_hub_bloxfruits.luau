@@ -219,7 +219,7 @@ local S = {
 	selectedBoat = "Grand Brigade",
 	seaBoatSpeed = 145,
 	seaSafeBoatFly = true,
-	seaReturnAt10km = true,
+	seaReturnAt10km = false,
 	seaResetOnBoatLost = true,
 	seaDodgeAttacks = true,
 	seaClearFog = true,
@@ -236,10 +236,10 @@ local S = {
 		["Haunted Shipwreck"] = true,
 	},
 	seaWeapons = {
-		["Blox Fruit"] = true,
+		["Blox Fruit"] = false,
 		["Melee"] = true,
-		["Sword"] = false,
-		["Gun"] = false,
+		["Sword"] = true,
+		["Gun"] = true,
 	},
 	-- Leviathan Multi-Find, Auto Start & Heart Delivery (Tiki Outpost / Hydra Island)
 	selectedLeviPlayers = {},
@@ -1288,13 +1288,15 @@ do
 		return nil, true
 	end
 
+	local SEA_SKILL_CATS = {"Melee", "Sword", "Gun"}
+
 	-- UNIFIED GLOBAL ADVANCED SETTING SKILLS CONTROLLER (AUTO-ROTATES WEAPONS + INTEGRATED SEA EVENTS + PER-WEAPON HOLD)
 	S.castGlobalSkills = function(preferredCategory, targetEnemy, targetPartOverride, contextMode)
 		local mode = contextMode or "general"
 		if mode == "mastery" then
 			if not (S.globalAutoSkills or S.skillsInMastery) then return false end
-		elseif mode == "sea" then
-			-- Integrated directly in Sea Events & Leviathan (uses enabled weapon skill sections automatically)
+		elseif mode == "sea" or mode == "sea_weapons" then
+			-- Integrated directly in Sea Events & Leviathan
 			if not (S.globalAutoSkills or S.autoSeaEvent or S.autoMultiFindLevi or S.leviOwnerAutoBuyBoat or S.autoStartLeviathan or S.autoAttackLeviathan or S.autoMultiSegmentsLevi or S.seaTaskRunning) then return false end
 		else
 			if not S.globalAutoSkills then return false end
@@ -1321,6 +1323,40 @@ do
 				if pickedKey then
 					chosenCat = mCat
 					keyName = pickedKey
+				end
+			end
+		elseif mode == "sea_weapons" then
+			-- Built-in Sea Events rule: always use skills of Gun, Sword and Melee (no Blox Fruit, no extra toggle required)
+			local rotCats = {}
+			for _, cName in ipairs(SEA_SKILL_CATS) do
+				if getToolByWeaponType(cName) then
+					local kList = getEnabledKeysForCategory(cName)
+					if #kList == 0 then
+						kList = VALID_SKILLS_BY_CATEGORY[cName] or {}
+					end
+					if #kList > 0 then
+						table.insert(rotCats, {cat = cName, keys = kList})
+					end
+				end
+			end
+			if #rotCats > 0 then
+				if rotateWeaponIdx > #rotCats then
+					rotateWeaponIdx = 1
+				end
+				for offset = 0, #rotCats - 1 do
+					local cIdx = ((rotateWeaponIdx - 1 + offset) % #rotCats) + 1
+					local entry = rotCats[cIdx]
+					local pickedKey, finishedWeaponCombo = pickReadyKeyFromCategory(entry.cat, entry.keys, now)
+					if pickedKey then
+						chosenCat = entry.cat
+						keyName = pickedKey
+						if finishedWeaponCombo then
+							rotateWeaponIdx = (cIdx % #rotCats) + 1
+						else
+							rotateWeaponIdx = cIdx
+						end
+						break
+					end
 				end
 			end
 		else
@@ -5921,6 +5957,7 @@ do
 		function(z)
 			S.selectedSeaZone = z
 			Others.arrivedSelectedSeaZone = false
+			Others.calibratedZoneX = {}
 		end
 	)
 	CardSeaNav:AddModeSelector(
@@ -5958,11 +5995,13 @@ do
 		function()
 			Others.returningFrom10km = false
 			Others.arrivedSelectedSeaZone = false
+			Others.calibratedZoneX = {}
 		end,
 		function()
 			Others.hadActiveSeaBoat = false
 			Others.returningFrom10km = false
 			Others.arrivedSelectedSeaZone = false
+			Others.calibratedZoneX = {}
 		end
 	)
 	CardSeaNav:AddToggle(
@@ -6025,32 +6064,6 @@ do
 		S.seaClearFog,
 		function(v)
 			S.seaClearFog = v
-		end
-	)
-
-	local CardSeaCombat = TabSeaEvents:CreateCard("⚔️ Armas y Clicks M1 para Eventos")
-	CardSeaCombat:AddMultiSelector(
-		"Seleccionar Armas (Eventos Marítimos)",
-		{"Blox Fruit", "Melee", "Sword", "Gun"},
-		S.seaWeapons,
-		function(map)
-			S.seaWeapons = map
-		end
-	)
-	CardSeaCombat:AddToggle(
-		"Usar M1 (Clicks de la Fruta) para Eventos",
-		"Dispara los clicks M1 de tu Blox Fruit contra Sea Beasts, Barcos, Terrorshark y eventos",
-		S.seaUseFruitM1,
-		function(v)
-			S.seaUseFruitM1 = v
-		end
-	)
-	CardSeaCombat:AddToggle(
-		"Usar Ataque Básico (M1 Armas) en Eventos",
-		"Usa golpes básicos M1 de Melee, Sword y Gun en los eventos marítimos",
-		S.seaUseM1,
-		function(v)
-			S.seaUseM1 = v
 		end
 	)
 
@@ -11279,6 +11292,9 @@ do
 	Others.hadActiveSeaBoat = false
 	Others.returningFrom10km = false
 	Others.arrivedSelectedSeaZone = false
+	Others.calibratedZoneX = {}
+	Others.lastDangerPollClock = 0
+	Others.cachedDangerLevel = nil
 	Others.activeBoatDrive = nil
 	Others.boatSeatedPart = nil
 	Others.boatSeatedSince = 0
@@ -11335,24 +11351,86 @@ do
 	local SEA3_DOCK_ORIGIN = Vector3.new(-16917.2, 28, 515.4) -- Tiki Outpost Boat Dealer
 	local SEA2_DOCK_ORIGIN = Vector3.new(-2818.8, 28, -9428.7) -- Sea 2 Open Ocean Dock
 
-	-- Real Danger Zone 1..6 coordinates spanning 1.8 km -> 9.5 km from Tiki Outpost (10 km = -26917)
+	-- Danger Zone 1..6 fallback centers (auto-calibrated live against Blox Fruits Compass / Danger UI)
 	local SEA3_ZONE_CENTERS = {
-		[1] = Vector3.new(-18700, 28, 500),
-		[2] = Vector3.new(-20300, 28, 500),
-		[3] = Vector3.new(-21900, 28, 500),
-		[4] = Vector3.new(-23500, 28, 500),
-		[5] = Vector3.new(-25100, 28, 500),
-		[6] = Vector3.new(-26400, 28, 500),
+		[1] = Vector3.new(-19600, 62, 500),
+		[2] = Vector3.new(-23000, 62, 500),
+		[3] = Vector3.new(-26600, 62, 500),
+		[4] = Vector3.new(-30400, 62, 500),
+		[5] = Vector3.new(-34400, 62, 500),
+		[6] = Vector3.new(-38600, 62, 500),
 	}
 
 	local SEA2_ZONE_CENTERS = {
-		[1] = Vector3.new(-4400, 28, -10250),
-		[2] = Vector3.new(-5800, 28, -11000),
-		[3] = Vector3.new(-7200, 28, -11750),
-		[4] = Vector3.new(-8600, 28, -12500),
-		[5] = Vector3.new(-10000, 28, -13250),
-		[6] = Vector3.new(-11200, 28, -13900),
+		[1] = Vector3.new(-4600, 62, -10350),
+		[2] = Vector3.new(-6200, 62, -11200),
+		[3] = Vector3.new(-7800, 62, -12050),
+		[4] = Vector3.new(-9500, 62, -12950),
+		[5] = Vector3.new(-11200, 62, -13850),
+		[6] = Vector3.new(-13000, 62, -14800),
 	}
+
+	function Others.getLiveSeaDangerLevel()
+		local now = os.clock()
+		if now - (Others.lastDangerPollClock or 0) < 0.25 then
+			return Others.cachedDangerLevel
+		end
+		Others.lastDangerPollClock = now
+		local detected = nil
+		pcall(function()
+			local pgui = LocalPlayer:FindFirstChild("PlayerGui")
+			if not pgui then return end
+
+			local function parseDangerText(txt, allowBareDigit)
+				if type(txt) ~= "string" or txt == "" then return nil end
+				local low = txt:lower()
+				if low:find("zona") or low:find("patrull") or low:find("volando") or low:find("lv%.") or low:find("hp") or low:find("km") or txt:find("/") then
+					return nil
+				end
+				if txt:find("%?%?%?") or (allowBareDigit and txt:match("^%s*%?+%s*$")) then
+					return 6
+				end
+				local explicit = low:match("danger[^%d%?]*([0-6])") or low:match("peligro[^%d%?]*([0-6])")
+				if explicit then
+					return tonumber(explicit)
+				end
+				if allowBareDigit then
+					local d = txt:match("^%s*([0-6])%s*$")
+					if d then
+						return tonumber(d)
+					end
+				end
+				return nil
+			end
+
+			for _, rootName in ipairs({"Main", "Compass", "SeaDanger"}) do
+				local gui = pgui:FindFirstChild(rootName)
+				if gui then
+					for _, desc in ipairs(gui:GetDescendants()) do
+						if desc:IsA("TextLabel") and desc.Visible then
+							local nLow = desc.Name:lower()
+							local pLow = desc.Parent and desc.Parent.Name:lower() or ""
+							local gpLow = desc.Parent and desc.Parent.Parent and desc.Parent.Parent.Name:lower() or ""
+							local isDangerWidget = nLow:find("danger") or pLow:find("danger") or gpLow:find("danger")
+								or nLow:find("sealevel") or pLow:find("sealevel") or nLow:find("rough") or pLow:find("rough")
+							local isUnrelated = nLow:find("health") or pLow:find("health") or pLow:find("energy")
+								or nLow:find("level") or nLow:find("beli") or nLow:find("frag") or nLow:find("quest")
+								or gpLow:find("quest") or gpLow:find("hp") or gpLow:find("stat")
+							if not isUnrelated then
+								local val = parseDangerText(desc.Text, isDangerWidget)
+								if val ~= nil then
+									detected = val
+									return
+								end
+							end
+						end
+					end
+				end
+			end
+		end)
+		Others.cachedDangerLevel = detected
+		return detected
+	end
 
 	function Others.resolveBoatKey(boatChoice)
 		local isMarine = (LocalPlayer.Team and LocalPlayer.Team.Name == "Marines")
@@ -11534,8 +11612,8 @@ do
 			bv.Velocity = Vector3.zero
 			seat.AssemblyLinearVelocity = Vector3.zero
 			seat.AssemblyAngularVelocity = Vector3.zero
-			if S.seaSafeBoatFly and seat.Position.Y < 42 then
-				Others.pivotBoatSeatTo(boat, seat, Vector3.new(seat.Position.X, 48, seat.Position.Z), nil)
+			if S.seaSafeBoatFly and seat.Position.Y < 56 then
+				Others.pivotBoatSeatTo(boat, seat, Vector3.new(seat.Position.X, 62, seat.Position.Z), nil)
 			end
 		end)
 	end
@@ -11545,11 +11623,12 @@ do
 			return false
 		end
 		local boatMissing = (not myBoat) or (not mySeat)
-		local boatTooFar = (mySeat ~= nil) and ((hrp.Position - mySeat.Position).Magnitude > 2200)
+		local boatTooFar = (mySeat ~= nil) and ((hrp.Position - mySeat.Position).Magnitude > 4800)
 		if (boatMissing or boatTooFar) and (os.clock() - Others.lastBoatResetClock > 8.0) then
 			Others.hadActiveSeaBoat = false
 			Others.returningFrom10km = false
 			Others.arrivedSelectedSeaZone = false
+			Others.calibratedZoneX = {}
 			Others.lastBoatResetClock = os.clock()
 			Others.cleanupBoatMovers()
 			clearFarmMover()
@@ -12151,7 +12230,7 @@ do
 				return true
 			end
 
-			local sailY = S.seaSafeBoatFly and 48 or 10
+			local sailY = S.seaSafeBoatFly and 62 or 10
 			local kitWaypoints = {
 				Vector3.new(-25000, sailY, 500), -- Zone 5 edge
 				Vector3.new(-26800, sailY, 500), -- Zone 6 (???) spawn trigger (< 10 km from Tiki!)
@@ -13164,8 +13243,7 @@ do
 					end
 				end)
 
-				local useCloseHover = (S.seaWeapons and S.seaWeapons["Blox Fruit"] and S.seaUseFruitM1) or S.seaUseM1
-				local hoverY = useCloseHover and 34 or 46
+				local hoverY = 34
 				local hpRatio = hum.Health / math.max(1, hum.MaxHealth)
 				if S.seaDodgeAttacks and hpRatio < 0.40 then
 					hoverY = math.max(hoverY + 38, 80)
@@ -13315,7 +13393,7 @@ do
 					Others.returningFrom10km = false
 				end
 
-				local sailY = S.seaSafeBoatFly and 48 or 12
+				local sailY = S.seaSafeBoatFly and 62 or 12
 				if Others.returningFrom10km then
 					local distNow = Others.driveBoatSeatTo(myBoat, mySeat, Vector3.new(-21650, sailY, 500), hrp, 3)
 					setStatus(string.format("↩️ Multi-Find (10 km): Regresando a 5.0 km [%.2f km]...", distNow / 1000))
@@ -13439,8 +13517,7 @@ do
 					end
 				end
 				if bestSB and bestPart then
-					local sbHover = ((S.seaWeapons and S.seaWeapons["Blox Fruit"] and S.seaUseFruitM1) or S.seaUseM1) and 34 or 52
-					return {kind = "Sea Beast", label = "🐉 Sea Beast", model = bestSB, part = bestPart, hoverY = sbHover}
+					return {kind = "Sea Beast", label = "🐉 Sea Beast", model = bestSB, part = bestPart, hoverY = 34}
 				end
 			end
 		end
@@ -13549,46 +13626,18 @@ do
 			end)
 		end
 
-		-- Build ordered list of enabled Sea Event weapons (Blox Fruit, Melee, Sword, Gun)
-		local activeWeapons = {}
-		for _, wName in ipairs(SEA_WEAPON_ORDER) do
-			if S.seaWeapons and S.seaWeapons[wName] and getToolByWeaponType(wName) then
-				table.insert(activeWeapons, wName)
-			end
-		end
-		if #activeWeapons == 0 then
-			table.insert(activeWeapons, S.weaponType or "Blox Fruit")
-		end
-
-		if #activeWeapons > 1 and (os.clock() - Others.lastSeaWeaponSwitch >= 2.0) then
-			Others.lastSeaWeaponSwitch = os.clock()
-			Others.seaWeaponIdx = (Others.seaWeaponIdx % #activeWeapons) + 1
-		end
-		if Others.seaWeaponIdx > #activeWeapons then
-			Others.seaWeaponIdx = 1
-		end
-
-		local curWeapon = activeWeapons[Others.seaWeaponIdx]
 		ensureBusoHaki()
-		local tool = equipWeaponType(curWeapon)
-		if tool then
-			local mp = tool:FindFirstChild("MousePos")
-			if mp and mp:IsA("Vector3Value") then
-				mp.Value = S.lastAimPos
-			end
+
+		-- Built-in default Sea Event combat:
+		-- Piranhas, Fish Crew Member & Sharks -> Normal Melee M1
+		-- Everything else (Sea Beast, Terrorshark, Pirate/Ghost Ship, Haunted Shipwreck, Leviathan) -> Gun, Sword & Melee skills
+		if kind == "Piranha" or kind == "Fish Crew Member" or kind == "Shark" then
+			equipWeaponType("Melee")
+			performNormalAttack("Melee", targetModel, true)
+			return
 		end
 
-		-- Fire Blox Fruit M1 Clicks (LeftClickRemote + Click + Hitbox) or Weapon M1s
-		if curWeapon == "Blox Fruit" then
-			if S.seaUseFruitM1 then
-				performNormalAttack("Blox Fruit", targetModel, true)
-			end
-		elseif S.seaUseM1 then
-			performNormalAttack(curWeapon, targetModel, true)
-		end
-
-		-- Centralized Global Skills controller (Advanced Setting Skills tab)
-		S.castGlobalSkills(curWeapon, targetModel, targetPart, "sea")
+		S.castGlobalSkills(nil, targetModel, targetPart, "sea_weapons")
 	end
 
 	function Others.stepSeaEvents(hrp, hum)
@@ -13602,17 +13651,52 @@ do
 		local zoneNum = math.clamp(tonumber(tostring(S.selectedSeaZone):match("(%d)")) or 6, 1, 6)
 		local zoneTable = (seaNum == 3) and SEA3_ZONE_CENTERS or SEA2_ZONE_CENTERS
 		local center = zoneTable[zoneNum] or zoneTable[6]
+		local calKey = tostring(seaNum) .. "_" .. tostring(zoneNum)
+		local liveDanger = Others.getLiveSeaDangerLevel()
+
+		local targetX = (Others.calibratedZoneX and Others.calibratedZoneX[calKey]) or center.X
+		local targetZ = center.Z
 		local refCheckPos = (mySeat and mySeat.Position) or hrp.Position
-		local distToCenter = Vector2.new(center.X - refCheckPos.X, center.Z - refCheckPos.Z).Magnitude
 
 		if not myBoat or not mySeat then
 			Others.arrivedSelectedSeaZone = false
-		elseif distToCenter <= 1650 then
-			Others.arrivedSelectedSeaZone = true
+		elseif liveDanger ~= nil then
+			if liveDanger < zoneNum then
+				Others.arrivedSelectedSeaZone = false
+				if Others.calibratedZoneX then
+					Others.calibratedZoneX[calKey] = nil
+				end
+				if seaNum == 3 then
+					targetX = math.max(-48000, math.min(center.X, refCheckPos.X - 3200))
+				else
+					targetX = math.max(-18000, math.min(center.X, refCheckPos.X - 1800))
+					targetZ = math.max(-18000, math.min(center.Z, refCheckPos.Z - 900))
+				end
+			elseif liveDanger == zoneNum then
+				Others.arrivedSelectedSeaZone = true
+				if Others.calibratedZoneX and not Others.calibratedZoneX[calKey] then
+					Others.calibratedZoneX[calKey] = refCheckPos.X
+				end
+				targetX = (Others.calibratedZoneX and Others.calibratedZoneX[calKey]) or refCheckPos.X
+			else
+				Others.arrivedSelectedSeaZone = false
+				if seaNum == 3 then
+					targetX = math.min(-18200, refCheckPos.X + 1600)
+				else
+					targetX = math.min(-3600, refCheckPos.X + 1200)
+				end
+			end
+		else
+			local distFallback = Vector2.new(targetX - refCheckPos.X, targetZ - refCheckPos.Z).Magnitude
+			if distFallback <= 1650 then
+				Others.arrivedSelectedSeaZone = true
+			end
 		end
 
+		local distToCenter = Vector2.new(targetX - refCheckPos.X, targetZ - refCheckPos.Z).Magnitude
+
 		-- 1) Check Active Hostile Sea Events once in/near selected zone (or when autoSeaEvent is OFF)
-		local shouldScanEvents = (not S.autoSeaEvent) or Others.arrivedSelectedSeaZone or (distToCenter <= 1650)
+		local shouldScanEvents = (not S.autoSeaEvent) or Others.arrivedSelectedSeaZone
 		local targetInfo = shouldScanEvents and Others.findActiveSeaEventTarget(hrp.Position) or nil
 		if targetInfo and targetInfo.part and targetInfo.model then
 			if myBoat and mySeat then
@@ -13620,6 +13704,13 @@ do
 			end
 			if hum.SeatPart then
 				hum.Sit = false
+				hum.Jump = true
+				pcall(function()
+					if mySeat then
+						hrp.CFrame = mySeat.CFrame + Vector3.new(0, 8, 0)
+					end
+					hrp.AssemblyLinearVelocity = Vector3.zero
+				end)
 				task.wait(0.05)
 			end
 
@@ -13629,7 +13720,7 @@ do
 				end
 			end)
 
-			local hoverY = targetInfo.hoverY or 25
+			local hoverY = targetInfo.hoverY or 24
 			local hpRatio = hum.Health / math.max(1, hum.MaxHealth)
 			if S.seaDodgeAttacks then
 				if hpRatio < 0.38 then
@@ -13639,8 +13730,10 @@ do
 				end
 			end
 
+			local isNormalMelee = (targetInfo.kind == "Piranha" or targetInfo.kind == "Fish Crew Member" or targetInfo.kind == "Shark")
+			local atkDesc = isNormalMelee and "Melee" or "Skills (Gun/Sword/Melee)"
 			local combatPos = targetInfo.part.Position + Vector3.new(0, hoverY, 2.5)
-			setStatus(string.format("%s: Atacando con Armas / Skills [%dm]...", targetInfo.label, math.floor((hrp.Position - targetInfo.part.Position).Magnitude)))
+			setStatus(string.format("%s: Atacando con %s [%dm]...", targetInfo.label, atkDesc, math.floor((hrp.Position - targetInfo.part.Position).Magnitude)))
 			moveToCFrame(CFrame.new(combatPos), targetInfo.part.Position)
 
 			if targetInfo.bringable then
@@ -13660,43 +13753,47 @@ do
 			return true
 		end
 
-		-- 6) Seated in VehicleSeat! Fly together with boat at moderate speed to Selected Zone + 10 km Turnaround check!
+		-- 6) Seated in VehicleSeat! Fly together with boat at moderate speed to Selected Zone
 		local dockOrigin = (seaNum == 3) and SEA3_DOCK_ORIGIN or SEA2_DOCK_ORIGIN
 		local curDistFromDock = Vector2.new(mySeat.Position.X - dockOrigin.X, mySeat.Position.Z - dockOrigin.Z).Magnitude
 
 		if S.seaReturnAt10km then
-			if curDistFromDock >= 10000 then
+			local targetDistFromDock = Vector2.new(targetX - dockOrigin.X, targetZ - dockOrigin.Z).Magnitude
+			local maxLimit = math.max(10000, targetDistFromDock + 1800)
+			local minReturn = math.max(5000, targetDistFromDock - 2200)
+			if curDistFromDock >= maxLimit then
 				Others.returningFrom10km = true
-			elseif Others.returningFrom10km and curDistFromDock <= 5000 then
+			elseif Others.returningFrom10km and curDistFromDock <= minReturn then
 				Others.returningFrom10km = false
 			end
 		else
 			Others.returningFrom10km = false
 		end
 
-		local sailY = S.seaSafeBoatFly and 48 or 10
+		local sailY = S.seaSafeBoatFly and 62 or 10
 
 		if Others.returningFrom10km then
 			local returnTarget = (seaNum == 3)
-				and Vector3.new(-21650, sailY, 500)
-				or Vector3.new(-7000, sailY, -11650)
+				and Vector3.new(math.min(-19500, targetX + 2000), sailY, targetZ)
+				or Vector3.new(math.min(-6000, targetX + 1500), sailY, targetZ + 900)
 			local distNow = Others.driveBoatSeatTo(myBoat, mySeat, returnTarget, hrp, seaNum)
-			setStatus(string.format("↩️ Límite 10 km alcanzado [%.2f km] -> Devolviéndose hacia 5.0 km...", distNow / 1000))
+			setStatus(string.format("↩️ Regresando dentro de Zona %d [%.2f km]...", zoneNum, distNow / 1000))
 			return true
 		end
 
+		-- Patrol North-South in Z so the Danger Level stays locked in the chosen Zone
 		local offsets = {
 			Vector3.new(0, 0, 0),
-			Vector3.new(350, 0, 450),
-			Vector3.new(-350, 0, 450),
-			Vector3.new(-350, 0, -450),
+			Vector3.new(0, 0, 480),
+			Vector3.new(-150, 0, 0),
+			Vector3.new(0, 0, -480),
 		}
 		if Others.seaPatrolIdx > #offsets then
 			Others.seaPatrolIdx = 1
 		end
 		local wp = Others.arrivedSelectedSeaZone
-			and (Vector3.new(center.X, sailY, center.Z) + offsets[Others.seaPatrolIdx])
-			or Vector3.new(center.X, sailY, center.Z)
+			and (Vector3.new(targetX, sailY, targetZ) + offsets[Others.seaPatrolIdx])
+			or Vector3.new(targetX, sailY, targetZ)
 		local distNow, remDist = Others.driveBoatSeatTo(myBoat, mySeat, wp, hrp, seaNum)
 
 		if Others.arrivedSelectedSeaZone and remDist <= 55 and (os.clock() - Others.lastSeaPatrolSwitch > 1.5) then
@@ -13704,10 +13801,11 @@ do
 			Others.seaPatrolIdx = (Others.seaPatrolIdx % #offsets) + 1
 		end
 
-		if not Others.arrivedSelectedSeaZone and distToCenter > 900 then
-			setStatus(string.format("⛵ Volando con el bote hacia Zona %d [%dm restantes | %.1f km]...", zoneNum, math.floor(distToCenter), distNow / 1000))
+		local dangerTag = (liveDanger ~= nil) and string.format(" | Danger: %s", liveDanger >= 6 and "???" or tostring(liveDanger)) or ""
+		if not Others.arrivedSelectedSeaZone then
+			setStatus(string.format("⛵ Volando con el bote hacia Zona %d [%dm | %.1f km%s]...", zoneNum, math.floor(distToCenter), distNow / 1000, dangerTag))
 		else
-			setStatus(string.format("🌊 Patrullando en Zona %d [%.1f km / 10 km] — Esperando Eventos...", zoneNum, distNow / 1000))
+			setStatus(string.format("🌊 Patrullando en Zona %d [%.1f km%s] — Esperando Eventos...", zoneNum, distNow / 1000, dangerTag))
 		end
 		return true
 	end
