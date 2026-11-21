@@ -11483,31 +11483,79 @@ do
 		[6] = Vector3.new(-13000, 62, -14800),
 	}
 
+	-- Minimum open-sea distance from dock before a Danger Zone reading can ever count as "arrived"
+	local MIN_ZONE_DIST_SEA3 = {
+		[1] = 1400,
+		[2] = 3400,
+		[3] = 5600,
+		[4] = 8000,
+		[5] = 10500,
+		[6] = 13000,
+	}
+	local MIN_ZONE_DIST_SEA2 = {
+		[1] = 1000,
+		[2] = 2400,
+		[3] = 4000,
+		[4] = 5600,
+		[5] = 7200,
+		[6] = 9000,
+	}
+
 	function Others.getLiveSeaDangerLevel()
 		local now = os.clock()
 		if now - (Others.lastDangerPollClock or 0) < 0.25 then
 			return Others.cachedDangerLevel
 		end
 		Others.lastDangerPollClock = now
+
+		-- Near Tiki Outpost or Sea 2 dock we are still in port / safe waters: never trust dock UI labels as sea danger
+		local char = LocalPlayer.Character
+		local hrp = char and char:FindFirstChild("HumanoidRootPart")
+		if hrp then
+			local seaNum = getCurrentSeaNumber()
+			local dock = (seaNum == 3) and SEA3_DOCK_ORIGIN or SEA2_DOCK_ORIGIN
+			local dDock = Vector2.new(hrp.Position.X - dock.X, hrp.Position.Z - dock.Z).Magnitude
+			if dDock < 1100 then
+				Others.cachedDangerLevel = nil
+				return nil
+			end
+		end
+
 		local detected = nil
 		pcall(function()
 			local pgui = LocalPlayer:FindFirstChild("PlayerGui")
 			if not pgui then return end
 
-			local function parseDangerText(txt, allowBareDigit)
+			local function parseDangerText(txt, isDangerWidget)
 				if type(txt) ~= "string" or txt == "" then return nil end
 				local low = txt:lower()
-				if low:find("zona") or low:find("patrull") or low:find("volando") or low:find("lv%.") or low:find("hp") or low:find("km") or txt:find("/") then
+				if low:find("zona") or low:find("patrull") or low:find("volando") or low:find("lv%.") or low:find("hp") or low:find("km") or low:find("beli") or txt:find("/") then
 					return nil
 				end
-				if txt:find("%?%?%?") or (allowBareDigit and txt:match("^%s*%?+%s*$")) then
+				-- Explicit "Danger: 0..6" or "Danger Level: ???" works even if parent widget name changed
+				local explicitNum = low:match("danger[^%d%?]*([0-6])") or low:match("peligro[^%d%?]*([0-6])")
+				if explicitNum then
+					return tonumber(explicitNum)
+				end
+				if (low:find("danger") or low:find("peligro")) and txt:find("%?%?%?") then
 					return 6
 				end
-				local explicit = low:match("danger[^%d%?]*([0-6])") or low:match("peligro[^%d%?]*([0-6])")
-				if explicit then
-					return tonumber(explicit)
-				end
-				if allowBareDigit then
+				-- Bare "???" or bare digit ONLY allowed on dedicated Danger / SeaLevel / RoughSea widgets (prevents Tiki HUD false positives!)
+				if isDangerWidget then
+					if txt:find("%?%?%?") or txt:match("^%s*%?+%s*$") then
+						return 6
+					end
+					if low:find("crazy") then
+						return 5
+					elseif low:find("extreme") then
+						return 4
+					elseif low:find("high") then
+						return 3
+					elseif low:find("medium") then
+						return 2
+					elseif low:find("low") then
+						return 1
+					end
 					local d = txt:match("^%s*([0-6])%s*$")
 					if d then
 						return tonumber(d)
@@ -11529,8 +11577,9 @@ do
 							local isUnrelated = nLow:find("health") or pLow:find("health") or pLow:find("energy")
 								or nLow:find("level") or nLow:find("beli") or nLow:find("frag") or nLow:find("quest")
 								or gpLow:find("quest") or gpLow:find("hp") or gpLow:find("stat")
+								or nLow:find("switchhub") or pLow:find("switchhub")
 							if not isUnrelated then
-								local val = parseDangerText(desc.Text, isDangerWidget)
+								local val = parseDangerText(desc.Text, isDangerWidget == true)
 								if val ~= nil then
 									detected = val
 									return
@@ -11812,6 +11861,8 @@ do
 			Others.hadActiveSeaBoat = false
 			Others.returningFrom10km = false
 			Others.arrivedSelectedSeaZone = false
+			Others.calibratedZoneX = {}
+			Others.cachedDangerLevel = nil
 			local dealerPos = Others.getBestBoatDealerPos(seaNum, hrp.Position)
 			local d = (hrp.Position - dealerPos).Magnitude
 			setStatus(string.format("%s: Yendo al Boat Dealer para comprar %s [%dm]...", labelPrefix, tostring(S.selectedBoat), math.floor(d)))
@@ -11957,7 +12008,7 @@ do
 			end
 
 			local nextPos = Vector3.new(curPos.X + horizStep.X, curPos.Y + dy, curPos.Z + horizStep.Z)
-			local newSeatCF = Others.pivotBoatSeatTo(boat, seat, nextPos, (flatDist > 2) and wp or nil)
+			local newSeatCF = Others.pivotBoatSeatTo(boat, seat, nextPos, (flatDist > 8) and wp or nil)
 			if newSeatCF then
 				bg.CFrame = newSeatCF
 			end
@@ -13759,12 +13810,21 @@ do
 		local calKey = tostring(seaNum) .. "_" .. tostring(zoneNum)
 		local liveDanger = Others.getLiveSeaDangerLevel()
 
+		local dockOrigin = (seaNum == 3) and SEA3_DOCK_ORIGIN or SEA2_DOCK_ORIGIN
+		local minZoneDist = (seaNum == 3 and MIN_ZONE_DIST_SEA3[zoneNum] or MIN_ZONE_DIST_SEA2[zoneNum]) or 0
+		local refCheckPos = (mySeat and mySeat.Position) or hrp.Position
+		local curDockDist = Vector2.new(refCheckPos.X - dockOrigin.X, refCheckPos.Z - dockOrigin.Z).Magnitude
+
 		local targetX = (Others.calibratedZoneX and Others.calibratedZoneX[calKey]) or center.X
 		local targetZ = center.Z
-		local refCheckPos = (mySeat and mySeat.Position) or hrp.Position
 
-		if not myBoat or not mySeat then
+		if not myBoat or not mySeat or curDockDist < minZoneDist then
 			Others.arrivedSelectedSeaZone = false
+			if Others.calibratedZoneX and curDockDist < minZoneDist then
+				Others.calibratedZoneX[calKey] = nil
+			end
+			targetX = center.X
+			targetZ = center.Z
 		elseif liveDanger ~= nil then
 			if liveDanger < zoneNum then
 				Others.arrivedSelectedSeaZone = false
@@ -13780,15 +13840,18 @@ do
 			elseif liveDanger == zoneNum then
 				Others.arrivedSelectedSeaZone = true
 				if Others.calibratedZoneX and not Others.calibratedZoneX[calKey] then
-					Others.calibratedZoneX[calKey] = refCheckPos.X
+					-- Step ~450 studs deeper inside the zone so edge-jitter never drops back to the previous zone
+					Others.calibratedZoneX[calKey] = (seaNum == 3)
+						and math.max(-48000, refCheckPos.X - 450)
+						or math.max(-18000, refCheckPos.X - 300)
 				end
 				targetX = (Others.calibratedZoneX and Others.calibratedZoneX[calKey]) or refCheckPos.X
 			else
 				Others.arrivedSelectedSeaZone = false
 				if seaNum == 3 then
-					targetX = math.min(-18200, refCheckPos.X + 1600)
+					targetX = math.min(dockOrigin.X - minZoneDist, refCheckPos.X + 1400)
 				else
-					targetX = math.min(-3600, refCheckPos.X + 1200)
+					targetX = math.min(dockOrigin.X - minZoneDist * 0.7, refCheckPos.X + 1200)
 				end
 			end
 		else
