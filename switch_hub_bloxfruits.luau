@@ -584,6 +584,34 @@ end
 --------------------------------------------------------------------------------
 genv.__SwitchHubOrigHooks = genv.__SwitchHubOrigHooks or {}
 local OrigHooks = genv.__SwitchHubOrigHooks
+local lastAimFallbackScan = 0
+local lastAimWriteClock = 0
+local lastAimWritePart = nil
+local lastAimWritePos = nil
+
+local function applyAimToMouseModule(targetPart, aimPos, originPos)
+	if not MouseModule or not targetPart then return end
+	local dir = aimPos - originPos
+	local unitDir = (dir.Magnitude > 0.001) and dir.Unit or Vector3.new(0, -1, 0)
+	MouseModule.Hit = CFrame.lookAt(aimPos, aimPos + unitDir)
+	MouseModule.Target = targetPart
+	MouseModule.Origin = CFrame.lookAt(originPos, aimPos)
+	MouseModule.UnitRay = Ray.new(originPos, unitDir)
+end
+
+local function isAimModelAlive(model)
+	if not model or not model.Parent then return false end
+	local eHum = model:FindFirstChildOfClass("Humanoid")
+	if eHum then
+		return eHum.Health > 0
+	end
+	local hVal = model:FindFirstChild("Health")
+	if hVal and hVal:IsA("ValueBase") then
+		local num = tonumber(hVal.Value)
+		return num ~= nil and num > 0
+	end
+	return false
+end
 
 local function getActiveAimlockPart()
 	local curS = genv.__SwitchHubBF_V2
@@ -607,35 +635,33 @@ local function getActiveAimlockPart()
 
 	local part = curS.lastAimPart
 	local model = curS.lastAimEnemy
-	if part and part.Parent and model and model.Parent then
-		local eHum = model:FindFirstChildOfClass("Humanoid")
-		local hVal = model:FindFirstChild("Health")
-		local alive = (eHum and eHum.Health > 0)
-			or (hVal and hVal:IsA("ValueBase") and tonumber(hVal.Value) ~= nil and tonumber(hVal.Value) > 0)
-		if alive then
-			return part, model
-		end
+	if part and part.Parent and isAimModelAlive(model) then
+		return part, model
 	end
 
-	-- Fallback auto-acquire nearest alive NPC / Sea Event within 160 studs when Auto Skills is active
+	-- Fallback auto-acquire nearest alive NPC / Sea Event within 160 studs when Auto Skills is active (throttled to prevent 60Hz workspace scans)
+	local now = os.clock()
+	if (now - lastAimFallbackScan < 0.15) and not curS.isCastingSkillAim then
+		return nil, nil
+	end
+	lastAimFallbackScan = now
+
 	local char = LocalPlayer.Character
 	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 	if hrp and (curS.isCastingSkillAim or curS.globalAutoSkills) then
 		local bestPart, bestModel, bestDist = nil, nil, 160
-		for _, folder in ipairs({Workspace:FindFirstChild("Enemies"), Workspace:FindFirstChild("SeaBeasts"), Workspace:FindFirstChild("SeaEvents")}) do
+		local folders = {Workspace:FindFirstChild("Enemies"), Workspace:FindFirstChild("SeaBeasts"), Workspace:FindFirstChild("SeaEvents")}
+		for i = 1, 3 do
+			local folder = folders[i]
 			if folder then
 				for _, m in ipairs(folder:GetChildren()) do
-					if m:IsA("Model") then
-						local eHum = m:FindFirstChildOfClass("Humanoid")
-						local hVal = m:FindFirstChild("Health")
-						local alive = (eHum and eHum.Health > 0)
-							or (hVal and hVal:IsA("ValueBase") and tonumber(hVal.Value) ~= nil and tonumber(hVal.Value) > 0)
+					if m:IsA("Model") and isAimModelAlive(m) then
 						local p = m:FindFirstChild("HumanoidRootPart")
 							or m:FindFirstChild("RootPart")
 							or m:FindFirstChild("Engine")
 							or m:FindFirstChild("UpperTorso")
 							or m:FindFirstChildWhichIsA("BasePart")
-						if alive and p then
+						if p then
 							local d = (p.Position - hrp.Position).Magnitude
 							if d < bestDist then
 								bestDist = d
@@ -659,54 +685,62 @@ local function getActiveAimlockPart()
 end
 genv.__SwitchHubGetAimPart = getActiveAimlockPart
 
-local function updateMasteryAimTarget(enemyModel)
+local function updateMasteryAimTarget(enemyModel, forceWrite)
 	if not enemyModel then
 		S.lastAimEnemy = nil
 		S.lastAimPart = nil
+		lastAimWritePart = nil
+		lastAimWritePos = nil
 		return
 	end
 	if not MouseModule and S.ensureCombatModulesReady then
 		S.ensureCombatModulesReady(false)
 	end
-	local targetPart = enemyModel:FindFirstChild("HumanoidRootPart")
-		or enemyModel:FindFirstChild("RootPart")
-		or enemyModel:FindFirstChild("Engine")
-		or enemyModel:FindFirstChild("Body")
-		or enemyModel:FindFirstChild("UpperTorso")
-		or enemyModel:FindFirstChild("Head")
-		or enemyModel.PrimaryPart
-		or enemyModel:FindFirstChildWhichIsA("BasePart")
+
+	local targetPart = (enemyModel == S.lastAimEnemy and S.lastAimPart and S.lastAimPart.Parent == enemyModel)
+		and S.lastAimPart
+		or (enemyModel:FindFirstChild("HumanoidRootPart")
+			or enemyModel:FindFirstChild("RootPart")
+			or enemyModel:FindFirstChild("Engine")
+			or enemyModel:FindFirstChild("Body")
+			or enemyModel:FindFirstChild("UpperTorso")
+			or enemyModel:FindFirstChild("Head")
+			or enemyModel.PrimaryPart
+			or enemyModel:FindFirstChildWhichIsA("BasePart"))
 	if not targetPart then return end
 
+	local aimPos = targetPart.Position
 	S.lastAimEnemy = enemyModel
 	S.lastAimPart = targetPart
-	S.lastAimPos = targetPart.Position
+	S.lastAimPos = aimPos
+
+	local now = os.clock()
+	if not forceWrite and not S.isCastingSkillAim and lastAimWritePart == targetPart and lastAimWritePos then
+		if (aimPos - lastAimWritePos).Magnitude < 0.25 and (now - lastAimWriteClock) < 0.05 then
+			return
+		end
+	end
+	lastAimWritePart = targetPart
+	lastAimWritePos = aimPos
+	lastAimWriteClock = now
+
+	local char = LocalPlayer.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
 	-- 1) Update ReplicatedStorage.Mouse so Z/X/C/V/F skills via MovesetClientRunner aim dead-center at the NPC
 	if MouseModule then
-		pcall(function()
-			local cam = Workspace.CurrentCamera
-			local char = LocalPlayer.Character
-			local hrp = char and char:FindFirstChild("HumanoidRootPart")
-			local originPos = (hrp and hrp.Position) or (cam and cam.CFrame.Position) or (S.lastAimPos + Vector3.new(0, 20, 0))
-			local dir = (S.lastAimPos - originPos)
-			local unitDir = (dir.Magnitude > 0.001) and dir.Unit or Vector3.new(0, -1, 0)
-			MouseModule.Hit = CFrame.lookAt(S.lastAimPos, S.lastAimPos + unitDir)
-			MouseModule.Target = targetPart
-			MouseModule.Origin = CFrame.lookAt(originPos, S.lastAimPos)
-			MouseModule.UnitRay = Ray.new(originPos, unitDir)
-		end)
+		local cam = Workspace.CurrentCamera
+		local originPos = (hrp and hrp.Position) or (cam and cam.CFrame.Position) or (aimPos + Vector3.new(0, 20, 0))
+		pcall(applyAimToMouseModule, targetPart, aimPos, originPos)
 	end
 
-	-- 2) Update equipped tool's MousePos Vector3Value if present
-	local char = LocalPlayer.Character
+	-- 2) Update equipped tool's MousePos Vector3Value without allocating char:GetChildren()
 	if char then
-		for _, item in ipairs(char:GetChildren()) do
-			if item:IsA("Tool") then
-				local mp = item:FindFirstChild("MousePos")
-				if mp and mp:IsA("Vector3Value") then
-					mp.Value = S.lastAimPos
-				end
+		local heldTool = char:FindFirstChildOfClass("Tool")
+		if heldTool then
+			local mp = heldTool:FindFirstChild("MousePos")
+			if mp and mp:IsA("Vector3Value") then
+				mp.Value = aimPos
 			end
 		end
 	end
@@ -783,17 +817,10 @@ do
 				local getter = genv.__SwitchHubGetAimPart
 				local part = getter and getter()
 				if part and MouseModule then
-					pcall(function()
-						local char = LocalPlayer.Character
-						local hrp = char and char:FindFirstChild("HumanoidRootPart")
-						local originPos = (hrp and hrp.Position) or (part.Position + Vector3.new(0, 20, 0))
-						local dir = (part.Position - originPos)
-						local unitDir = (dir.Magnitude > 0.001) and dir.Unit or Vector3.new(0, -1, 0)
-						MouseModule.Hit = CFrame.lookAt(part.Position, part.Position + unitDir)
-						MouseModule.Target = part
-						MouseModule.Origin = CFrame.lookAt(originPos, part.Position)
-						MouseModule.UnitRay = Ray.new(originPos, unitDir)
-					end)
+					local char = LocalPlayer.Character
+					local hrp = char and char:FindFirstChild("HumanoidRootPart")
+					local originPos = (hrp and hrp.Position) or (part.Position + Vector3.new(0, 20, 0))
+					pcall(applyAimToMouseModule, part, part.Position, originPos)
 				end
 				return ret
 			end
@@ -899,11 +926,27 @@ do
 end
 
 local onStatusChanged = nil
+local lastStatusUiPush = 0
+local lastPushedStatusMsg = nil
+
 local function setStatus(msg)
-	S.statusText = msg
-	if onStatusChanged then
-		pcall(onStatusChanged, msg)
+	if msg == S.statusText then
+		return
 	end
+	S.statusText = msg
+	if not onStatusChanged then
+		return
+	end
+	local now = os.clock()
+	local isFastCounterMsg = msg:find("[HP", 1, true) ~= nil
+		or msg:find("m]", 1, true) ~= nil
+		or msg:find("% ->", 1, true) ~= nil
+	if isFastCounterMsg and lastPushedStatusMsg ~= nil and (now - lastStatusUiPush < 0.22) then
+		return
+	end
+	lastStatusUiPush = now
+	lastPushedStatusMsg = msg
+	pcall(onStatusChanged, msg)
 end
 
 local function ensureTeamSelected()
@@ -923,35 +966,41 @@ end
 --------------------------------------------------------------------------------
 -- WEAPON EQUIP, HAKI & RELIABLE MELEE / SWORD / GUN / FRUIT HIT REGISTRATION
 --------------------------------------------------------------------------------
+local function matchesWeaponTool(item, wType, targetTip)
+	if not item or not item:IsA("Tool") then return false end
+	if item.ToolTip == targetTip then return true end
+	local wAttr = item:GetAttribute("WeaponType")
+	if wAttr then
+		if wType == "Blox Fruit" and (wAttr == "Demon Fruit" or wAttr == "Blox Fruit") then
+			return true
+		elseif wAttr:lower() == wType:lower() then
+			return true
+		end
+	end
+	return false
+end
+
 local function getToolByWeaponType(wType)
 	local char = LocalPlayer.Character
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
 	local targetTip = (wType == "Blox Fruit") and "Blox Fruit" or wType
 
-	local function matchesTool(item)
-		if not item:IsA("Tool") then return false end
-		if item.ToolTip == targetTip then return true end
-		local wAttr = item:GetAttribute("WeaponType")
-		if wAttr then
-			if wType == "Blox Fruit" and (wAttr == "Demon Fruit" or wAttr == "Blox Fruit") then
-				return true
-			elseif wAttr:lower() == wType:lower() then
-				return true
-			end
-		end
-		return false
-	end
-
+	-- Fast zero-allocation path when the desired weapon is already held
 	if char then
+		local held = char:FindFirstChildOfClass("Tool")
+		if held and matchesWeaponTool(held, wType, targetTip) then
+			return held
+		end
 		for _, item in ipairs(char:GetChildren()) do
-			if matchesTool(item) then
+			if item:IsA("Tool") and matchesWeaponTool(item, wType, targetTip) then
 				return item
 			end
 		end
 	end
+
+	local backpack = LocalPlayer:FindFirstChild("Backpack")
 	if backpack then
 		for _, item in ipairs(backpack:GetChildren()) do
-			if matchesTool(item) then
+			if matchesWeaponTool(item, wType, targetTip) then
 				return item
 			end
 		end
@@ -1018,24 +1067,38 @@ local FakeAttackInput = {
 	end,
 }
 
+local lastSimRadiusClock = 0
+local function applySimulationRadius()
+	if sethiddenproperty then
+		sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
+	end
+end
+
+local function ensureSimulationRadius()
+	if not sethiddenproperty then return end
+	local now = os.clock()
+	if now - lastSimRadiusClock < 1.5 then return end
+	lastSimRadiusClock = now
+	pcall(applySimulationRadius)
+end
+
+local function getEnemyHitPart(model)
+	return model:FindFirstChild("UpperTorso")
+		or model:FindFirstChild("Head")
+		or model:FindFirstChild("RightUpperArm")
+		or model:FindFirstChild("HumanoidRootPart")
+		or model:FindFirstChild("RootPart")
+		or model:FindFirstChild("Leviathan body")
+		or model:FindFirstChild("Engine")
+		or model:FindFirstChild("Body")
+		or model.PrimaryPart
+		or model:FindFirstChildWhichIsA("BasePart")
+end
+
 -- Collects nearby alive enemies' hit parts (including multi-segment Leviathan sweeps) so M1 & AoE hits register 100% damage
 local function getEnemyHitTargets(primaryEnemy)
 	local enemiesFolder = Workspace:FindFirstChild("Enemies")
-
-	local function getHitPart(model)
-		return model:FindFirstChild("UpperTorso")
-			or model:FindFirstChild("Head")
-			or model:FindFirstChild("RightUpperArm")
-			or model:FindFirstChild("HumanoidRootPart")
-			or model:FindFirstChild("RootPart")
-			or model:FindFirstChild("Leviathan body")
-			or model:FindFirstChild("Engine")
-			or model:FindFirstChild("Body")
-			or model.PrimaryPart
-			or model:FindFirstChildWhichIsA("BasePart")
-	end
-
-	local primaryPart = primaryEnemy and getHitPart(primaryEnemy)
+	local primaryPart = primaryEnemy and getEnemyHitPart(primaryEnemy)
 	local extraTargets = {}
 
 	local char = LocalPlayer.Character
@@ -1046,21 +1109,22 @@ local function getEnemyHitTargets(primaryEnemy)
 	local isLeviMulti = S.autoMultiSegmentsLevi and primaryEnemy and tostring(primaryEnemy.Name):find("Leviathan") ~= nil
 	local maxExtra = isLeviMulti and 8 or 2
 	local maxRange = isLeviMulti and 250 or 40
-	local folders = isLeviMulti
-		and {enemiesFolder, Workspace:FindFirstChild("SeaBeasts"), Workspace:FindFirstChild("SeaEvents")}
-		or {enemiesFolder}
 
-	for _, folder in ipairs(folders) do
-		if folder then
-			for _, en in ipairs(folder:GetChildren()) do
-				if en ~= primaryEnemy and en:IsA("Model") and #extraTargets < maxExtra then
-					if (not isLeviMulti) or tostring(en.Name):find("Leviathan") then
-						local eHum = en:FindFirstChildOfClass("Humanoid")
-						local hVal = en:FindFirstChild("Health")
-						local alive = (eHum and eHum.Health > 0)
-							or (hVal and hVal:IsA("ValueBase") and tonumber(hVal.Value) ~= nil and tonumber(hVal.Value) > 0)
-						local part = getHitPart(en)
-						if alive and part and (part.Position - centerPos).Magnitude <= maxRange then
+	local function collectFromFolder(folder)
+		if not folder then return end
+		for _, en in ipairs(folder:GetChildren()) do
+			if primaryPart and #extraTargets >= maxExtra then
+				break
+			end
+			if en ~= primaryEnemy and en:IsA("Model") then
+				if (not isLeviMulti) or tostring(en.Name):find("Leviathan") then
+					local eHum = en:FindFirstChildOfClass("Humanoid")
+					local hVal = en:FindFirstChild("Health")
+					local alive = (eHum and eHum.Health > 0)
+						or (hVal and hVal:IsA("ValueBase") and tonumber(hVal.Value) ~= nil and tonumber(hVal.Value) > 0)
+					if alive then
+						local part = getEnemyHitPart(en)
+						if part and (part.Position - centerPos).Magnitude <= maxRange then
 							if not primaryPart then
 								primaryPart = part
 							else
@@ -1073,10 +1137,19 @@ local function getEnemyHitTargets(primaryEnemy)
 		end
 	end
 
+	if isLeviMulti then
+		collectFromFolder(enemiesFolder)
+		collectFromFolder(Workspace:FindFirstChild("SeaBeasts"))
+		collectFromFolder(Workspace:FindFirstChild("SeaEvents"))
+	else
+		collectFromFolder(enemiesFolder)
+	end
+
 	return primaryPart, extraTargets
 end
 
 local lastNormalSwing = 0
+local lastVisualSwing = 0
 local fruitM1Combo = 1
 local performNormalAttack
 local triggerSelectedMasterySkills
@@ -1193,7 +1266,8 @@ do
 					hum:EquipTool(meleeTool)
 				end
 
-				if CombatController then
+				if CombatController and (os.clock() - lastVisualSwing >= 0.42) then
+					lastVisualSwing = os.clock()
 					pcall(function() CombatController:Attack(meleeTool, FakeAttackInput) end)
 				end
 				local regRE = getRegisterAttackRemote()
@@ -1581,10 +1655,53 @@ do
 		S.castGlobalSkills(S.masteryCategory, targetEnemy, nil, "mastery")
 	end
 
+	local function sendFruitLeftClick(char, tool)
+		local hrp = char:FindFirstChild("HumanoidRootPart")
+		local aimPos = S.lastAimPos or (hrp and (hrp.Position + hrp.CFrame.LookVector * 25))
+		if not aimPos then return end
+		local mp = tool:FindFirstChild("MousePos")
+		if mp and mp:IsA("Vector3Value") then
+			mp.Value = aimPos
+		end
+		local lcr = tool:FindFirstChild("LeftClickRemote")
+		if lcr and lcr:IsA("RemoteEvent") and hrp then
+			local dir = aimPos - hrp.Position
+			local unitDir = (dir.Magnitude > 0.001) and dir.Unit or Vector3.new(0, -1, 0)
+			fruitM1Combo = (fruitM1Combo % 4) + 1
+			lcr:FireServer(unitDir, fruitM1Combo)
+		end
+	end
+
+	local function dispatchAttackSwing(tool, isMeleeOrSwordOrFruit, triggerVisualSwing, triggerActivateFallback)
+		if triggerVisualSwing and CombatController then
+			CombatController:Attack(tool, FakeAttackInput)
+		end
+		if isMeleeOrSwordOrFruit then
+			local regRE = getRegisterAttackRemote()
+			if regRE then
+				regRE:FireServer(0)
+			end
+		end
+		if triggerActivateFallback then
+			tool:Activate()
+			VirtualUser:CaptureController()
+			VirtualUser:ClickButton1(Vector2.new(0, 0))
+		end
+	end
+
+	local function dispatchHitsToServer(primaryEnemy)
+		if GlobalModule and GlobalModule.SendHitsToServer then
+			local primaryPart, extraTargets = getEnemyHitTargets(primaryEnemy)
+			if primaryPart then
+				GlobalModule.SendHitsToServer(primaryPart, extraTargets)
+			end
+		end
+	end
+
 	performNormalAttack = function(weaponTypeOverride, primaryEnemy, skipGeneralSkills)
 		if isCastingGlobalSkill then return end
 		local now = os.clock()
-		if now - lastNormalSwing < 0.065 then return end
+		if now - lastNormalSwing < 0.095 then return end
 		lastNormalSwing = now
 
 		local char = LocalPlayer.Character
@@ -1619,53 +1736,24 @@ do
 		-- Dedicated Blox Fruit M1 Click support (LeftClickRemote + MousePos + Activate + CombatController)
 		local isFruitTool = (targetWType == "Blox Fruit") or isToolBloxFruit(tool)
 		if isFruitTool then
-			pcall(function()
-				local hrp = char:FindFirstChild("HumanoidRootPart")
-				local aimPos = S.lastAimPos or (hrp and (hrp.Position + hrp.CFrame.LookVector * 25))
-				if aimPos then
-					local mp = tool:FindFirstChild("MousePos")
-					if mp and mp:IsA("Vector3Value") then
-						mp.Value = aimPos
-					end
-					local lcr = tool:FindFirstChild("LeftClickRemote")
-					if lcr and lcr:IsA("RemoteEvent") and hrp then
-						local dir = (aimPos - hrp.Position)
-						local unitDir = (dir.Magnitude > 0.001) and dir.Unit or Vector3.new(0, -1, 0)
-						fruitM1Combo = (fruitM1Combo % 4) + 1
-						lcr:FireServer(unitDir, fruitM1Combo)
-					end
-				end
-			end)
+			pcall(sendFruitLeftClick, char, tool)
 		end
 
 		local isMeleeOrSwordOrFruit = (targetWType == "Melee" or targetWType == "Sword" or isFruitTool)
-		pcall(function()
-			if CombatController then
-				CombatController:Attack(tool, FakeAttackInput)
-			end
-			if isMeleeOrSwordOrFruit then
-				local regRE = getRegisterAttackRemote()
-				if regRE then
-					regRE:FireServer(0)
-				end
-			end
-			if isFruitTool or not CombatController then
-				tool:Activate()
-				VirtualUser:CaptureController()
-				VirtualUser:ClickButton1(Vector2.new(0, 0))
-			end
-		end)
+		-- Throttle heavy client swing animations/particles/sounds/camera shake for Melee & Sword
+		-- while RE/RegisterAttack(0) + SendHitsToServer keeps full server hit rate!
+		local visualInterval = (isFruitTool or targetWType == "Gun") and 0.16 or 0.42
+		local triggerVisualSwing = (now - lastVisualSwing) >= visualInterval
+		if triggerVisualSwing then
+			lastVisualSwing = now
+		end
+		local triggerActivateFallback = (isFruitTool and triggerVisualSwing) or (not CombatController)
+
+		pcall(dispatchAttackSwing, tool, isMeleeOrSwordOrFruit, triggerVisualSwing, triggerActivateFallback)
 
 		-- Register Melee / Sword / Fruit M1 hits immediately via CombatUtil's SendHitsToServer
 		if isMeleeOrSwordOrFruit then
-			pcall(function()
-				if GlobalModule and GlobalModule.SendHitsToServer then
-					local primaryPart, extraTargets = getEnemyHitTargets(primaryEnemy)
-					if primaryPart then
-						GlobalModule.SendHitsToServer(primaryPart, extraTargets)
-					end
-				end
-			end)
+			pcall(dispatchHitsToServer, primaryEnemy)
 		end
 
 		-- Doble Daño: Weave hidden Melee M1 directly behind the Blox Fruit M1 swing!
@@ -2129,40 +2217,55 @@ end
 --------------------------------------------------------------------------------
 -- BRING MOBS (STRICTLY MAX 3 MOBS) & TARGET LOCKING
 --------------------------------------------------------------------------------
+local function applyMobBringState(enemy, centerCFrame, eHum, eHrp, dist)
+	if dist > 2.2 then
+		eHrp.CFrame = centerCFrame
+	end
+	if eHrp.CanCollide then
+		eHrp.CanCollide = false
+	end
+	if eHrp.Velocity.Magnitude > 1.5 then
+		eHrp.Velocity = Vector3.zero
+	end
+	if eHum.WalkSpeed ~= 0 then
+		eHum.WalkSpeed = 0
+	end
+	if eHum.JumpPower ~= 0 then
+		eHum.JumpPower = 0
+	end
+end
+
 local function bringNearbyMobs(targetNamesMap, centerCFrame)
 	if not S.bringMobs then return end
 	local enemiesFolder = Workspace:FindFirstChild("Enemies")
 	if not enemiesFolder then return end
 
-	pcall(function()
-		if sethiddenproperty then
-			sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
-		end
-	end)
+	ensureSimulationRadius()
 
 	local brought = 0
 	local maxAllowed = S.maxBringMobs or 3 -- Strictly maximum 3 mobs
+	local centerPos = centerCFrame.Position
 
 	for _, enemy in ipairs(enemiesFolder:GetChildren()) do
 		if brought >= maxAllowed then
 			break
 		end
-		local clean = enemy.Name:gsub(" %[Raid Boss%]", ""):gsub(" %[Boss%]", ""):gsub(" %[Lv%. %d+%]", "")
-		local matches = (not targetNamesMap) or targetNamesMap[clean] or targetNamesMap[enemy.Name]
-		if matches and not enemy.Name:find("%[Boss%]") then
-			local eHum = enemy:FindFirstChildOfClass("Humanoid")
-			local eHrp = enemy:FindFirstChild("HumanoidRootPart")
-			if eHum and eHum.Health > 0 and eHrp then
-				local dist = (eHrp.Position - centerCFrame.Position).Magnitude
-				if dist <= 260 then
-					brought = brought + 1
-					pcall(function()
-						eHrp.CFrame = centerCFrame
-						eHrp.CanCollide = false
-						eHrp.Velocity = Vector3.zero
-						eHum.WalkSpeed = 0
-						eHum.JumpPower = 0
-					end)
+		local eName = enemy.Name
+		if not eName:find("%[Boss%]") then
+			local matches = (not targetNamesMap) or targetNamesMap[eName]
+			if not matches and eName:find("[", 1, true) then
+				local clean = eName:gsub(" %[Raid Boss%]", ""):gsub(" %[Boss%]", ""):gsub(" %[Lv%. %d+%]", "")
+				matches = targetNamesMap[clean]
+			end
+			if matches then
+				local eHum = enemy:FindFirstChildOfClass("Humanoid")
+				local eHrp = enemy:FindFirstChild("HumanoidRootPart")
+				if eHum and eHum.Health > 0 and eHrp then
+					local dist = (eHrp.Position - centerPos).Magnitude
+					if dist <= 260 then
+						brought = brought + 1
+						pcall(applyMobBringState, enemy, centerCFrame, eHum, eHrp, dist)
+					end
 				end
 			end
 		end
@@ -6865,6 +6968,28 @@ do
 	local cachedSteppedParts = {}
 	local lastCharPartsRefresh = 0
 	local waterPlaneElevated = false
+	local lastSeaFogClock = 0
+	local lastSteppedAimClock = 0
+	local LightingService = game:GetService("Lighting")
+
+	local function refillEnergy(char)
+		local energyObj = char:FindFirstChild("Energy")
+		if energyObj and energyObj.Value < energyObj.MaxValue then
+			energyObj.Value = energyObj.MaxValue
+		end
+	end
+
+	local function applySeaClearFog()
+		if LightingService.FogEnd < 90000 then
+			LightingService.FogEnd = 100000
+			LightingService.FogStart = 100000
+		end
+		for _, ch in ipairs(LightingService:GetChildren()) do
+			if ch:IsA("Atmosphere") and ch.Density > 0 then
+				ch.Density = 0
+			end
+		end
+	end
 
 	local function getCachedCharacterParts(char)
 		local now = os.clock()
@@ -6882,6 +7007,7 @@ do
 	end
 
 	connect(RunService.Stepped, function()
+		local now = os.clock()
 		local char = LocalPlayer.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		if char then
@@ -6892,31 +7018,22 @@ do
 					end
 				end
 			end
-			if S.infEnergy and char:FindFirstChild("Energy") then
-				pcall(function()
-					char.Energy.Value = char.Energy.MaxValue
-				end)
+			if S.infEnergy then
+				pcall(refillEnergy, char)
 			end
-			if S.customSpeedEnabled and hum then
+			if S.customSpeedEnabled and hum and hum.WalkSpeed ~= S.customWalkSpeed then
 				hum.WalkSpeed = S.customWalkSpeed
 			end
 		end
-		if (S.autoSeaEvent or S.autoMultiFindLevi or S.leviOwnerAutoBuyBoat or S.autoStartLeviathan or S.autoAttackLeviathan or S.autoMultiSegmentsLevi or S.autoDeliverLeviHeart or S.autoSpawnKitsune or S.seaTaskRunning) and S.seaClearFog then
-			pcall(function()
-				local lighting = game:GetService("Lighting")
-				if lighting.FogEnd < 90000 then
-					lighting.FogEnd = 100000
-					lighting.FogStart = 100000
-				end
-				for _, ch in ipairs(lighting:GetChildren()) do
-					if ch:IsA("Atmosphere") and ch.Density > 0 then
-						ch.Density = 0
-					end
-				end
-			end)
+		if S.seaClearFog and (now - lastSeaFogClock >= 1.0) and (S.autoSeaEvent or S.autoMultiFindLevi or S.leviOwnerAutoBuyBoat or S.autoStartLeviathan or S.autoAttackLeviathan or S.autoMultiSegmentsLevi or S.autoDeliverLeviHeart or S.autoSpawnKitsune or S.seaTaskRunning) then
+			lastSeaFogClock = now
+			pcall(applySeaClearFog)
 		end
-		if getActiveAimlockPart() ~= nil and S.lastAimEnemy and S.lastAimEnemy.Parent then
-			updateMasteryAimTarget(S.lastAimEnemy)
+		if S.lastAimEnemy and S.lastAimEnemy.Parent and (S.isCastingSkillAim or (now - lastSteppedAimClock >= 0.05)) then
+			if getActiveAimlockPart() ~= nil then
+				lastSteppedAimClock = now
+				updateMasteryAimTarget(S.lastAimEnemy, S.isCastingSkillAim)
+			end
 		end
 		local shouldElevateWater = S.walkOnWater and (hum ~= nil and hum.SeatPart == nil and not S.isBoardingBoat)
 		if shouldElevateWater or waterPlaneElevated then
@@ -11106,11 +11223,7 @@ do
 				Others.chipFailCount = 0
 			end
 
-			pcall(function()
-				if sethiddenproperty then
-					sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
-				end
-			end)
+			ensureSimulationRadius()
 
 			local mob = findAliveEnemyFromSet(nil, 2600)
 			if mob then
@@ -13000,11 +13113,7 @@ do
 		if S.autoDeliverLeviHeart then
 			local heartObj, heartPart = Others.findLeviathanHeart()
 			if heartObj and heartPart then
-				pcall(function()
-					if sethiddenproperty then
-						sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
-					end
-				end)
+				ensureSimulationRadius()
 
 				local bhBoat, bhSeat, harpoon, isMyBH = Others.findBeastHunterBoat(heartPart.Position)
 				if not bhBoat or not bhSeat or not harpoon then
@@ -13237,11 +13346,7 @@ do
 					task.wait(0.05)
 				end
 
-				pcall(function()
-					if sethiddenproperty then
-						sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
-					end
-				end)
+				ensureSimulationRadius()
 
 				local hoverY = 34
 				local hpRatio = hum.Health / math.max(1, hum.MaxHealth)
@@ -13714,11 +13819,7 @@ do
 				task.wait(0.05)
 			end
 
-			pcall(function()
-				if sethiddenproperty then
-					sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
-				end
-			end)
+			ensureSimulationRadius()
 
 			local hoverY = targetInfo.hoverY or 24
 			local hpRatio = hum.Health / math.max(1, hum.MaxHealth)
@@ -13824,7 +13925,7 @@ end
 -- Main Farm Loop (Single authoritative loop with Full Stack Priority)
 task.spawn(function()
 	while isAlive() do
-		task.wait(0.085)
+		task.wait(0.10)
 		pcall(function()
 			if not isAlive() then return end
 
@@ -14668,13 +14769,28 @@ do
 	end
 
 	local function muteVFXInstance(inst)
-		if not inst or isProtectedVisualInstance(inst) then return end
-		if inst:IsA("ParticleEmitter") or inst:IsA("Trail") or inst:IsA("Beam") or inst:IsA("Sparkles") or inst:IsA("Smoke") or inst:IsA("Fire") then
+		if not inst then return end
+		local isEffect = inst:IsA("ParticleEmitter")
+			or inst:IsA("Trail")
+			or inst:IsA("Beam")
+			or inst:IsA("Sparkles")
+			or inst:IsA("Smoke")
+			or inst:IsA("Fire")
+		local isExplosion = (not isEffect) and inst:IsA("Explosion")
+		if not isEffect and not isExplosion then return end
+		if isProtectedVisualInstance(inst) then return end
+		if isEffect then
 			inst.Enabled = false
-		elseif inst:IsA("Explosion") then
+		else
 			inst.BlastPressure = 0
 			inst.Visible = false
 		end
+	end
+
+	local function optimizeAddedBasePart(inst)
+		if isProtectedVisualInstance(inst) then return end
+		inst.CastShadow = false
+		inst.Reflectance = 0
 	end
 
 	S.runOptimizationPass = function(fullMapScan)
@@ -14745,14 +14861,14 @@ do
 	end
 
 	connect(Workspace.DescendantAdded, function(inst)
+		if not S.reduceAttackVFX and not S.fpsBoost then
+			return
+		end
 		if S.reduceAttackVFX then
 			pcall(muteVFXInstance, inst)
 		end
-		if S.fpsBoost and inst:IsA("BasePart") and not isProtectedVisualInstance(inst) then
-			pcall(function()
-				inst.CastShadow = false
-				inst.Reflectance = 0
-			end)
+		if S.fpsBoost and inst:IsA("BasePart") then
+			pcall(optimizeAddedBasePart, inst)
 		end
 	end)
 
