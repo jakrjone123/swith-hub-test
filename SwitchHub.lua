@@ -8543,7 +8543,7 @@ do
 							end
 							if payload.Context == "SpawnEmber" and addedCount > 0 then
 								Others.embersSpawnedThisQuest = (Others.embersSpawnedThisQuest or 0) + addedCount
-								if Others.embersSpawnedThisQuest >= 3 then
+								if Others.embersSpawnedThisQuest >= 2 then
 									Others.hunterQuestNotifyDone = true
 								end
 							end
@@ -9466,17 +9466,22 @@ do
 		local mobHum = mob and mob.Parent and mob:FindFirstChildOfClass("Humanoid")
 		local mobHrp = mob and mob.Parent and (mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChild("Torso"))
 		if not mob or not mob.Parent or not mobHum or mobHum.Health <= 0 or not mobHrp or mob.Name:gsub("%s*%[.-%]%s*", "") ~= mobName then
-			if mob ~= nil and mobHum and mobHum.Health <= 0 and (not mobHrp or (hrp.Position - mobHrp.Position).Magnitude <= 140) then
+			if mob ~= nil and Others.hunterLockedMobNear and ((not mob.Parent) or (mobHum and mobHum.Health <= 0)) then
 				Others.hunterKillCount = (Others.hunterKillCount or 0) + 1
 				Others.lastHunterPoll = 0
 			end
 			Others.hunterLockedMob = nil
+			Others.hunterLockedMobNear = false
 			mob = findAliveEnemyFromSet(mSet)
 			if mob then
 				Others.hunterLockedMob = mob
 			end
 		end
 		if mob then
+			local mHrp = mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChild("Torso")
+			if mHrp and (hrp.Position - mHrp.Position).Magnitude <= 90 then
+				Others.hunterLockedMobNear = true
+			end
 			engageEnemy(mob, mSet, "🐉 Dragon Hunter")
 		else
 			local sp = collectSpawnsForSet(mSet)
@@ -9518,12 +9523,22 @@ do
 				setStatus("🔥 Dragon Hunter: ¡Recogiendo Blaze Ember!")
 				local reached = moveToCFrame(CFrame.new(emberPos))
 				if reached or (hrp.Position - emberPos).Magnitude <= 16 then
+					if S.activeTween then
+						pcall(function() S.activeTween:Cancel() end)
+						S.activeTween = nil
+					end
 					hrp.AssemblyLinearVelocity = Vector3.zero
 					hrp.CFrame = CFrame.new(emberPos)
 					if emberPart and firetouchinterest then
+						local ch = hrp.Parent
+						local torso = ch and (ch:FindFirstChild("LowerTorso") or ch:FindFirstChild("UpperTorso") or ch:FindFirstChild("Torso"))
 						pcall(function()
 							firetouchinterest(hrp, emberPart, 0)
 							firetouchinterest(hrp, emberPart, 1)
+							if torso then
+								firetouchinterest(torso, emberPart, 0)
+								firetouchinterest(torso, emberPart, 1)
+							end
 						end)
 					end
 					-- Clear queued fallback entries near pickup spot so we never bounce back to an old spawn coordinate
@@ -9577,7 +9592,7 @@ do
 
 		-- If local kill/tree count or Ember completion fired for the active quest, go verify & turn in at Dojo
 		if Others.hunterTask and not Others.hunterNeedRequest then
-			local finishedKills = (Others.hunterTask == "Enforcer" or Others.hunterTask == "Venomous") and (Others.hunterKillCount or 0) >= 4
+			local finishedKills = (Others.hunterTask == "Enforcer" or Others.hunterTask == "Venomous") and (Others.hunterKillCount or 0) >= 3
 			local finishedTrees = (Others.hunterTask == "Trees") and (Others.treeBrokenCount or 0) >= 10
 			if Others.hunterQuestNotifyDone or finishedKills or finishedTrees then
 				if distToHunter > 85 then
