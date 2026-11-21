@@ -1172,7 +1172,7 @@ do
 		if not meleeTool or meleeTool == fruitTool then return end
 
 		weavingDoubleDamage = true
-		task.delay(0.055, function()
+		task.delay(0.04, function()
 			pcall(function()
 				if not isAlive() or not S.doubleDamage or isCastingGlobalSkill or not char or not char.Parent then
 					weavingDoubleDamage = false
@@ -1193,12 +1193,12 @@ do
 					hum:EquipTool(meleeTool)
 				end
 
+				if CombatController then
+					pcall(function() CombatController:Attack(meleeTool, FakeAttackInput) end)
+				end
 				local regRE = getRegisterAttackRemote()
 				if regRE then
 					pcall(function() regRE:FireServer(0) end)
-				end
-				if CombatController then
-					pcall(function() CombatController:Attack(meleeTool, FakeAttackInput) end)
 				end
 				if GlobalModule and GlobalModule.SendHitsToServer then
 					local primaryPart, extraTargets = getEnemyHitTargets(primaryEnemy)
@@ -1208,7 +1208,7 @@ do
 				end
 
 				-- Snap immediately back to the Blox Fruit so the Melee strike stays hidden behind Fruit M1
-				task.delay(0.06, function()
+				task.delay(0.045, function()
 					pcall(function()
 						if S.doubleDamage and not isCastingGlobalSkill and fruitTool and fruitTool.Parent and hum and hum.Health > 0 and fruitTool.Parent ~= char then
 							hum:EquipTool(fruitTool)
@@ -1226,7 +1226,7 @@ do
 		if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
 			return
 		end
-		if os.clock() - lastNormalSwing < 0.18 then
+		if os.clock() - lastNormalSwing < 0.095 then
 			return -- Automated performNormalAttack already handled this swing
 		end
 		local char = LocalPlayer.Character
@@ -1548,7 +1548,7 @@ do
 	performNormalAttack = function(weaponTypeOverride, primaryEnemy, skipGeneralSkills)
 		if isCastingGlobalSkill then return end
 		local now = os.clock()
-		if now - lastNormalSwing < 0.24 then return end
+		if now - lastNormalSwing < 0.065 then return end
 		lastNormalSwing = now
 
 		local char = LocalPlayer.Character
@@ -1602,9 +1602,16 @@ do
 			end)
 		end
 
+		local isMeleeOrSwordOrFruit = (targetWType == "Melee" or targetWType == "Sword" or isFruitTool)
 		pcall(function()
 			if CombatController then
 				CombatController:Attack(tool, FakeAttackInput)
+			end
+			if isMeleeOrSwordOrFruit then
+				local regRE = getRegisterAttackRemote()
+				if regRE then
+					regRE:FireServer(0)
+				end
 			end
 			if isFruitTool or not CombatController then
 				tool:Activate()
@@ -1613,17 +1620,15 @@ do
 			end
 		end)
 
-		-- Ensure Melee / Sword / Fruit M1 hit registration connects via CombatUtil's SendHitsToServer
-		if targetWType == "Melee" or targetWType == "Sword" or isFruitTool then
-			task.delay(0.03, function()
-				pcall(function()
-					if GlobalModule and GlobalModule.SendHitsToServer then
-						local primaryPart, extraTargets = getEnemyHitTargets(primaryEnemy)
-						if primaryPart then
-							GlobalModule.SendHitsToServer(primaryPart, extraTargets)
-						end
+		-- Register Melee / Sword / Fruit M1 hits immediately via CombatUtil's SendHitsToServer
+		if isMeleeOrSwordOrFruit then
+			pcall(function()
+				if GlobalModule and GlobalModule.SendHitsToServer then
+					local primaryPart, extraTargets = getEnemyHitTargets(primaryEnemy)
+					if primaryPart then
+						GlobalModule.SendHitsToServer(primaryPart, extraTargets)
 					end
-				end)
+				end
 			end)
 		end
 
@@ -13509,7 +13514,7 @@ end
 -- Main Farm Loop (Single authoritative loop with Full Stack Priority)
 task.spawn(function()
 	while isAlive() do
-		task.wait(0.14)
+		task.wait(0.085)
 		pcall(function()
 			if not isAlive() then return end
 
